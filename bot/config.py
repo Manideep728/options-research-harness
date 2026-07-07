@@ -83,6 +83,7 @@ class Settings:
 
     # --- files ---
     state_file: str = field(default="state.json")
+    control_file: str = field(default="control.json")
     log_file: str = field(default="bot.log")
     journal_file: str = field(default="trades.csv")
     tuned_params_file: str = field(default="tuned_params.json")

@@ -92,6 +92,7 @@ def cfg_for(tmp_path, **overrides) -> Settings:
         symbols=overrides.pop("symbols", ("SPY",)),
         state_file=str(tmp_path / "state.json"),
         journal_file=str(tmp_path / "trades.csv"),
+        control_file=str(tmp_path / "control.json"),
         **overrides,
     )
 
