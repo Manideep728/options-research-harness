@@ -3,5 +3,9 @@ __pycache__/
 *.pyc
 .env
 state.json
+control.json
+trades.csv
 bot.log
 .pytest_cache/
+web/.next/
+web/node_modules/

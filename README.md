@@ -1,34 +1,44 @@
 # Options Paper-Trading Bot
 
 Automatic options trading bot for an **Alpaca paper account**. On a 60-second
-loop during market hours it pulls 5-minute bars, computes EMA/RSI, and — when
-the strict rules line up — buys a single call or put, then manages the exit.
-Long options only: maximum possible loss on any trade is the premium paid.
+loop during market hours it pulls 15-minute bars, computes EMA/RSI, and — when
+the strict rules line up — buys a single call or put with a marketable limit
+order, then manages the exit. Long options only: maximum possible loss on any
+trade is the premium paid.
 
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
 endpoint. Nothing here is financial advice; the strategy is a disciplined
-skeleton, not a profit claim.
+skeleton with **no proven edge** (see Backtesting below for the honest
+numbers), designed so the risk caps contain the damage while evidence
+accumulates.
 
-## Strategy (all thresholds in `bot/config.py`)
+## Strategy (defaults in `bot/config.py`, tunables in `tuned_params.json`)
 
-**Entry** — evaluated per symbol (`SPY, QQQ, AAPL, MSFT, NVDA`) on the latest
-closed bar:
+**Entry** — evaluated per symbol (`SPY, QQQ` — index ETFs only: no earnings
+gaps, tightest option spreads) on the latest closed 15-minute bar:
 
 | Condition | Buy CALL | Buy PUT |
 |---|---|---|
-| Trend filter | EMA9 > EMA21 | EMA9 < EMA21 |
-| Trigger | RSI(14) crosses **up** through 35 | RSI(14) crosses **down** through 65 |
+| Trend filter | EMA-fast > EMA-slow | EMA-fast < EMA-slow |
+| Trigger | RSI(14) crosses **up** through the bull level | RSI(14) crosses **down** through the bear level |
+
+The default RSI levels are 45/55, not the textbook 30/70 — measured on a year
+of real SPY/QQQ 15-minute data, RSI almost never reaches classic extremes
+while the trend filter agrees; 35/65 produced literally zero signals.
 
 Contract picked: nearest expiry within **7–14 DTE**, first strike OTM, and it
 must pass liquidity gates (bid > 0, spread ≤ 10% of mid, open interest ≥ 100).
+Entries use a **marketable limit** (mid + 1%, capped at the ask); exits sell
+with a limit at the bid. Unfilled orders are canceled after 120 s.
 
-**Exits** (checked every loop): take profit **+50%**, stop loss **−25%**,
-time stop at **≤ 2 DTE**.
+**Exits** (checked every loop, priced on the **bid**, not the mark): take
+profit **+50%**, stop loss **−25%**, time stop at **≤ 2 DTE**, max hold
+**2 days** (entry time from the trade journal).
 
-**Risk gates** (all must pass): max 3 open positions, 1 per underlying,
-premium ≤ 2% of equity, max 3 new trades/day, and a **daily circuit breaker**
-that halts new entries if the account is down 4% on the day. No entries in the
-first/last 15 minutes of the session.
+**Risk gates** (hard — the self-tuner cannot touch these): max 3 open
+positions, 1 per underlying, premium ≤ 2% of equity, max 3 new trades/day,
+and a **daily circuit breaker** that halts new entries if the account is down
+4% from yesterday's close. No entries in the first/last 15 minutes.
 
 ## Setup
 
@@ -40,8 +50,7 @@ copy .env.example .env   # then edit .env
 
 Get free **paper** API keys: sign up at https://alpaca.markets, open the
 dashboard, switch to **Paper Trading**, and generate an API key pair. Put both
-values in `.env`. (Use paper keys only — the bot refuses nothing else, but the
-client itself always targets `paper-api.alpaca.markets`.)
+values in `.env`.
 
 ## Run
 
@@ -55,7 +64,49 @@ client itself always targets `paper-api.alpaca.markets`.)
 
 Every cycle logs each symbol's indicator readings and the decision reason
 (enter / skip / hold / exit) to the console and `bot.log`. Daily trade counts
-survive restarts via `state.json`.
+survive restarts via `state.json`; every fill is journaled to `trades.csv`
+with FIFO-matched realized P&L.
+
+## Dashboard
+
+The repository now includes a local web dashboard in `web/` and a small
+FastAPI backend in `dashboard_api.py`.
+
+```powershell
+.venv\Scripts\python run_dashboard.py
+```
+
+The dashboard reads live bot state from the API, shows the current signal and
+risk reasoning, and exposes cautious controls for pausing new entries,
+resuming, canceling orders, and closing positions.
+
+## Backtesting & self-tuning
+
+```powershell
+.venv\Scripts\python backtest.py --days 365          # replay current params
+.venv\Scripts\python backtest.py --days 365 --tune   # guarded self-tuning
+```
+
+The backtester replays the exact live signal rules over historical bars with
+an explicit option-P&L approximation (delta gearing, theta decay, spread
+costs — constants in `bot/simulator.py`). `--tune` grid-searches the signal
+and exit parameters under **hard guidelines** (`bot/tuner.py`):
+
+1. Risk caps are not in the search space at all.
+2. Every candidate value is clamped into `TUNABLE_BOUNDS` — twice.
+3. ≥ 30 trades required on both the train and validation windows.
+4. The winner must have positive validation expectancy AND beat the current
+   parameters out-of-sample by ≥ 10%.
+
+Accepted changes are written to `tuned_params.json` **with their evidence**;
+the bot applies them (re-clamped) on next start. If nothing qualifies, the
+current parameters stand.
+
+**Honest numbers** (365 days ending 2026-07-07, all costs modeled): default
+params full-period expectancy was **−2.9%** of premium per trade across 117
+trades — i.e. no demonstrated edge. The accepted tuned params showed +15.65%
+on the validation window (46 trades), but that figure is selected-on-
+validation and should be read as an optimistic upper bound, not a promise.
 
 ## Tests
 
@@ -63,20 +114,32 @@ survive restarts via `state.json`.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-48 tests cover the indicator math (including a known Wilder RSI value), signal
-triggers, contract filters, every risk gate, and full engine cycles against a
-fake broker (entry, exit, holds, limits, closed market).
+78 tests cover the indicator math (including a known Wilder RSI value), signal
+triggers, contract filters, every risk gate, journal P&L matching, the
+simulator (verified bar-for-bar identical to the live signal logic), the
+tuner guardrails (clamping, non-tunable risk caps, thin-evidence rejection),
+and full engine cycles against a fake broker (entries, exits, order
+reconciliation, stale-order cancels, max-hold via journal).
 
 ## Layout
 
 ```
 main.py            entry point (logging, config validation, loop start)
-bot/config.py      every tunable: symbols, thresholds, limits
+backtest.py        backtest / self-tune CLI
+bot/config.py      every tunable + TUNABLE_BOUNDS + clamped tuned-param loading
 bot/indicators.py  EMA / Wilder RSI (pure math)
 bot/strategy.py    signal logic (pure)
 bot/options.py     contract selection + liquidity gates (pure)
-bot/risk.py        entry gates, sizing, exit rules (pure)
+bot/risk.py        entry gates, sizing, exit rules incl. max hold (pure)
+bot/simulator.py   backtest engine + option P&L model (pure)
+bot/tuner.py       guarded grid search + walk-forward validation
+bot/journal.py     trades.csv fill journal, FIFO realized P&L
 bot/state.py       daily counters persisted to state.json
+bot/control.py     pause/resume flag shared with the dashboard
+bot/dashboard.py   live snapshot builder for the dashboard API
 bot/broker.py      the ONLY module that talks to Alpaca; DRY_RUN lives here
-bot/engine.py      the loop: clock -> exits -> entries -> sleep
+bot/engine.py      the loop: clock -> reconcile -> exits -> entries -> sleep
+dashboard_api.py   FastAPI backend for the web dashboard
+run_dashboard.py   launches API + web frontend together
+web/               Next.js dashboard frontend
 ```

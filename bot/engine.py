@@ -8,7 +8,7 @@ import logging
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
-from bot import journal, risk, state
+from bot import control, journal, risk, state
 from bot.config import Settings
 from bot.options import pick_contract
 from bot.strategy import Action, evaluate
@@ -53,6 +53,11 @@ class Engine:
 
         positions = self.broker.get_option_positions()
         self.manage_exits(positions, clock.now, open_orders)
+
+        control_state = control.load_control(self.cfg.control_file)
+        if control_state.paused:
+            log.info("bot paused; skipping new entries")
+            return
 
         if not self._in_entry_window(clock):
             return

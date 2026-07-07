@@ -1,4 +1,6 @@
 alpaca-py>=0.33.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
 tzdata>=2024.1  # IANA timezone database for zoneinfo on Windows
