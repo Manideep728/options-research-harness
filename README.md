@@ -73,12 +73,25 @@ The repository now includes a local web dashboard in `web/` and a small
 FastAPI backend in `dashboard_api.py`.
 
 ```powershell
-.venv\Scripts\python run_dashboard.py
+cd web
+npm run dev
 ```
 
+`npm run dev` boots the FastAPI backend automatically (reusing it if it's
+already running on `:8000`) alongside the Next.js frontend, so opening the
+dashboard never needs a second terminal. **Opening the dashboard does not
+start the trading loop** — `main.py` only runs once you explicitly start it.
+
+Equivalently, `.venv\Scripts\python run_dashboard.py` still launches the API
+and frontend together from the Python side, without npm.
+
 The dashboard reads live bot state from the API, shows the current signal and
-risk reasoning, and exposes cautious controls for pausing new entries,
-resuming, canceling orders, and closing positions.
+risk reasoning, and exposes two separate sets of controls:
+
+- **Bot process** — Start/stop the trading loop (`main.py`) itself as an OS
+  process. This is the on/off switch; nothing trades while it's stopped.
+- **Entry gate** — Pause/resume new entries on an already-running bot without
+  touching exits, plus canceling orders and closing positions.
 
 ## Backtesting & self-tuning
 
@@ -139,7 +152,8 @@ bot/control.py     pause/resume flag shared with the dashboard
 bot/dashboard.py   live snapshot builder for the dashboard API
 bot/broker.py      the ONLY module that talks to Alpaca; DRY_RUN lives here
 bot/engine.py      the loop: clock -> reconcile -> exits -> entries -> sleep
-dashboard_api.py   FastAPI backend for the web dashboard
-run_dashboard.py   launches API + web frontend together
+dashboard_api.py   FastAPI backend for the web dashboard; also starts/stops main.py on request
+run_dashboard.py   launches API + web frontend together (Python-side alternative to npm run dev)
 web/               Next.js dashboard frontend
+web/scripts/dev-with-api.js   npm run dev entrypoint: boots the API, then next dev
 ```

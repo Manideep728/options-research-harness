@@ -36,6 +36,20 @@ export async function resumeBot(): Promise<void> {
   }
 }
 
+export async function startBotEngine(): Promise<void> {
+  const response = await request("/control/bot/start", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`start bot request failed: ${response.status}`);
+  }
+}
+
+export async function stopBotEngine(): Promise<void> {
+  const response = await request("/control/bot/stop", { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`stop bot request failed: ${response.status}`);
+  }
+}
+
 export async function cancelOrder(orderId: string): Promise<void> {
   const response = await request(`/orders/${encodeURIComponent(orderId)}/cancel`, {
     method: "POST",

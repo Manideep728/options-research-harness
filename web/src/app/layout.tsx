@@ -1,15 +1,10 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Space_Grotesk, Geist } from "next/font/google";
+import { IBM_Plex_Mono, Geist } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 
-const geist = Geist({subsets:['latin'],variable:'--font-sans'});
-
-const displayFont = Space_Grotesk({
-  variable: "--font-display",
-  subsets: ["latin"],
-});
+const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 
 const monoFont = IBM_Plex_Mono({
   variable: "--font-mono",
@@ -30,7 +25,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={cn("h-full", "antialiased", displayFont.variable, monoFont.variable, "font-sans", geist.variable)}
+      className={cn("h-full", "antialiased", monoFont.variable, "font-sans", geist.variable)}
     >
       <body className="min-h-full flex flex-col">
         <TooltipProvider>{children}</TooltipProvider>
