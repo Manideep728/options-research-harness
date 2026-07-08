@@ -24,6 +24,7 @@ export interface BotSnapshot {
   loop_interval_sec: number;
   symbols: string[];
   paused: boolean;
+  engine_running: boolean;
 }
 
 export interface DaySnapshot {
