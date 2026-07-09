@@ -23,6 +23,10 @@ export interface BotSnapshot {
   dry_run: boolean;
   loop_interval_sec: number;
   symbols: string[];
+  // Optional: an older/stale API process may not emit these yet, so consumers
+  // must guard against undefined (tsc enforces it) rather than crash.
+  active_symbols?: string[];
+  ranked_at?: string | null;
   paused: boolean;
   engine_running: boolean;
 }
@@ -61,6 +65,8 @@ export interface SymbolSnapshot {
   size_allowed: boolean | null;
   size_reason: string | null;
   rejections: Array<{ contract_symbol: string; reason: string }> | null;
+  score?: number | null;       // optional: absent from an older API process
+  rank_detail?: string | null;
 }
 
 export interface ContractSnapshot {

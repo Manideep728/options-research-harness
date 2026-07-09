@@ -8,7 +8,7 @@ import logging
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
-from bot import control, earnings, journal, risk, scanner, state
+from bot import control, earnings, journal, risk, scanner, state, watchlist
 from bot.config import Settings
 from bot.options import pick_contract
 from bot.strategy import Action, evaluate
@@ -208,6 +208,14 @@ class Engine:
         top = eligible[: self.cfg.active_list_size]
         self._active = tuple(s.symbol for s in top)
         self._last_ranked = now
+
+        # Publish for the dashboard process (empty list is a valid state:
+        # everything eligible was blacked out).
+        watchlist.save_active(
+            self.cfg.active_file,
+            now,
+            [watchlist.ActiveEntry(s.symbol, s.score, s.detail) for s in top],
+        )
 
         log.info("re-ranked %d symbols -> active shortlist:", len(ranked))
         for s in top:

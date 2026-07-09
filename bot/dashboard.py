@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
-from bot import control, journal, risk, state
+from bot import control, journal, risk, state, watchlist
 from bot.broker import Fill
 from bot.config import Settings
 from bot.options import pick_contract
@@ -34,6 +34,8 @@ class SymbolSnapshot:
     size_allowed: bool | None = None
     size_reason: str | None = None
     rejections: list[dict[str, str]] | None = None
+    score: float | None = None          # rank score from the last scan
+    rank_detail: str | None = None      # human-readable score breakdown
 
 
 @dataclass(frozen=True)
@@ -112,9 +114,14 @@ def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
         for o in open_buys
     ]
 
+    # Only snapshot the engine's active shortlist — not all 30 names — so a
+    # dashboard refresh makes a handful of data calls, not one per symbol.
+    shortlist = watchlist.load_active(cfg.active_file)
+
     symbol_snapshots: list[SymbolSnapshot] = []
     recent_activity: list[dict] = []
-    for symbol in cfg.symbols:
+    for entry in shortlist.entries:
+        symbol = entry.symbol
         closes = broker.get_closes(symbol)
         signal = evaluate(closes, cfg)
         trend = "up" if signal.action == Action.BUY_CALL else "down" if signal.action == Action.BUY_PUT else "flat"
@@ -158,6 +165,8 @@ def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
                 size_allowed=size_allowed,
                 size_reason=size_reason,
                 rejections=rejections,
+                score=entry.score,
+                rank_detail=entry.detail,
             )
         )
         recent_activity.append(
@@ -234,7 +243,9 @@ def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
         bot={
             "dry_run": cfg.dry_run,
             "loop_interval_sec": cfg.loop_interval_sec,
-            "symbols": list(cfg.symbols),
+            "symbols": list(cfg.symbols),          # full universe (metadata)
+            "active_symbols": [e.symbol for e in shortlist.entries],
+            "ranked_at": shortlist.ranked_at,      # when the shortlist was last built
             "paused": control_state.paused,
         },
         day={

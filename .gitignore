@@ -4,6 +4,7 @@ __pycache__/
 .env
 state.json
 control.json
+active.json
 trades.csv
 bot.log
 earnings.json

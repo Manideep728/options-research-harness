@@ -368,10 +368,13 @@ function Header({
         </div>
 
         <div className="grid gap-2 sm:grid-cols-2 lg:w-[380px]">
-          <MiniStat label="Symbols" value={snapshot?.bot.symbols.join(" / ") ?? "-"} />
+          <MiniStat
+            label="Watching"
+            value={snapshot?.bot.active_symbols?.length ? snapshot.bot.active_symbols.join(" / ") : "-"}
+          />
           <MiniStat label="Loop" value={snapshot ? `${snapshot.bot.loop_interval_sec}s` : "-"} />
           <MiniStat label="Generated" value={snapshot ? formatDateTime(snapshot.generated_at) : "-"} />
-          <MiniStat label="Symbols tracked" value={snapshot ? compact.format(snapshot.symbols.length) : "-"} />
+          <MiniStat label="Universe" value={snapshot ? compact.format(snapshot.bot.symbols.length) : "-"} />
         </div>
       </div>
     </Panel>
