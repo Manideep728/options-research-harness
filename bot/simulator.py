@@ -34,6 +34,7 @@ class SimTrade:
     exit_px: float
     pnl_pct: float      # of premium, net of costs
     reason: str
+    symbol: str = ""    # set when the caller simulates one known underlying
 
 
 @dataclass
@@ -98,10 +99,17 @@ def simulate(
     times: list[datetime],
     cfg: Settings,
     sp: SimParams = SimParams(),
+    signal_fn=None,
+    symbol: str = "",
 ) -> SimResult:
-    """One position at a time (mirrors the live one-per-underlying cap)."""
+    """One position at a time (mirrors the live one-per-underlying cap).
+
+    `signal_fn(closes) -> list[Action]` overrides the built-in live signal so
+    the research loop can simulate alternative strategy families through this
+    same P&L engine. It must be causal: signals[i] may only use closes[:i+1].
+    Default (None) is the live EMA+RSI logic, unchanged."""
     result = SimResult()
-    signals = signal_series(closes, cfg)
+    signals = signal_fn(closes) if signal_fn is not None else signal_series(closes, cfg)
     gearing = sp.delta / sp.premium_pct_of_spot
 
     i = 0
@@ -140,6 +148,7 @@ def simulate(
                 exit_px=closes[exit_j],
                 pnl_pct=pnl,
                 reason=exit_reason,
+                symbol=symbol,
             )
         )
         i = exit_j + 1  # flat again; scan for the next signal
