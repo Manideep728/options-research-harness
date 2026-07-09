@@ -89,15 +89,18 @@ class DashboardSnapshot:
 
 
 def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
+    """Read-only: the engine is the sole writer of trades.csv/state.json (the
+    single-writer principle — two processes appending/rolling-over the same
+    file races). Fills not yet journaled by the engine simply won't show a
+    realized_pnl until its next cycle picks them up, seconds later."""
     clock = broker.get_clock()
     open_orders, fills = broker.get_todays_option_orders(_day_start(clock.now))
-    journal.append_fills(cfg.journal_file, fills)
     control_state = control.load_control(cfg.control_file)
 
     positions = broker.get_option_positions()
     equity = broker.get_equity()
     last_equity = broker.get_last_equity() or equity
-    day_state = state.load_day_state(cfg.state_file, clock.now.date(), last_equity)
+    day_state = state.peek_day_state(cfg.state_file, clock.now.date(), last_equity)
     open_buys = [o for o in open_orders if o.side == "buy"]
     broker_trade_count = sum(1 for fill in fills if fill.side == "buy") + len(open_buys)
     trades_today = max(day_state.trades_today, broker_trade_count)

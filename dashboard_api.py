@@ -1,12 +1,16 @@
 """FastAPI backend for the local trading dashboard."""
 
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from bot import lock
 from bot.broker import AlpacaBroker
 from bot.config import Settings
 from bot.control import save_control
@@ -27,15 +31,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# CSRF guard: this API binds to localhost and has no auth, so without this any
+# website a browser has open could POST to /control/bot/start, /positions/*
+# /close, etc. — CORS alone doesn't stop that, since it only governs whether
+# the calling page may *read* the response, not whether the browser *sends*
+# the request. Requiring a custom header forces the browser to run a CORS
+# preflight for every mutating request, and our allow_origins above rejects
+# that preflight for any origin except the dashboard itself — so a
+# cross-origin page can no longer get a state-changing request through, with
+# or without JS reading the reply.
+_CSRF_HEADER = "x-dashboard-client"
+
+
+@app.middleware("http")
+async def require_dashboard_header(request: Request, call_next):
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and _CSRF_HEADER not in request.headers:
+        return JSONResponse(status_code=403, content={"detail": "missing dashboard client header"})
+    return await call_next(request)
+
 # The engine (bot/engine.py's trading loop) runs as its own OS process,
 # started with `python main.py`. This API only tracks and controls that
 # child process's lifecycle — it never runs the loop itself, so opening the
 # dashboard (which boots this API) never starts trading on its own.
+#
+# Liveness is checked via the engine's PID file (bot/lock.py), not this
+# process's own subprocess.Popen handle: the handle is lost whenever the API
+# restarts, which would otherwise make a still-running engine look "stopped"
+# and let a Start click spawn a second one racing the same account.
 _engine_process: subprocess.Popen | None = None
 
 
 def _engine_running() -> bool:
-    return _engine_process is not None and _engine_process.poll() is None
+    return lock.is_running(cfg.lock_file)
+
+
+def _terminate_engine(timeout_sec: float = 5.0) -> None:
+    """Stop the engine by PID, however it was started (this API's own
+    subprocess, a previous API instance, or a manually-run `python main.py`)."""
+    pid = lock.read_pid(cfg.lock_file)
+    if pid is None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True, check=False,
+        )
+    else:
+        import signal
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    deadline = time.monotonic() + timeout_sec
+    while lock.is_running(cfg.lock_file) and time.monotonic() < deadline:
+        time.sleep(0.2)
 
 
 @app.get("/health")
@@ -66,12 +116,7 @@ def stop_bot() -> dict:
     if not _engine_running():
         _engine_process = None
         return {"ok": True, "engine_running": False, "already_stopped": True}
-    _engine_process.terminate()
-    try:
-        _engine_process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _engine_process.kill()
-        _engine_process.wait(timeout=5)
+    _terminate_engine()
     _engine_process = None
     return {"ok": True, "engine_running": False, "already_stopped": False}
 
@@ -113,7 +158,7 @@ def close_position(symbol: str) -> dict:
 @app.on_event("shutdown")
 def _stop_engine_on_shutdown() -> None:
     if _engine_running():
-        _engine_process.terminate()
+        _terminate_engine()
 
 
 if __name__ == "__main__":

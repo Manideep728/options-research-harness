@@ -2,6 +2,7 @@
 rejection on thin evidence, and the tuned-file round trip."""
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from bot.config import Settings, apply_tuned_params, clamp_tunables
@@ -89,3 +90,51 @@ def test_tune_rejects_when_not_enough_trades():
     outcome = tune({"SPY": (closes, times)}, Settings(api_key="", secret_key=""))
     assert not outcome.accepted
     assert outcome.best_val is None or outcome.best_val.n < MIN_TRADES
+
+
+# --- selection bias (guideline 4): winner must be picked on TRAIN, not val ---
+
+def test_winner_is_selected_on_train_not_validation(monkeypatch):
+    """Regression test for a data-snooping bug: the tuner used to rank
+    candidates by validation expectancy, so the reported "evidence" was
+    selected on the same data it was validated against. Here candidate B
+    looks better on validation but worse on train; the fix must pick A (best
+    on train) and must never even look at B's validation result."""
+    import bot.tuner as tuner_mod
+
+    params_a = {"rsi_bull_level": 40.0}   # best on TRAIN
+    params_b = {"rsi_bull_level": 45.0}   # best on VALIDATION (the trap)
+
+    results = {
+        ("train", 40.0): FakeResult(n=40, expectancy=0.20),
+        ("val", 40.0): FakeResult(n=40, expectancy=0.02),
+        ("train", 45.0): FakeResult(n=40, expectancy=0.05),
+        ("val", 45.0): FakeResult(n=40, expectancy=0.30),
+        ("val", 50.0): FakeResult(n=40, expectancy=0.0),  # current params' baseline
+    }
+    calls: list[tuple[str, float]] = []
+
+    def fake_run_all(windows, cfg, sp):
+        which = next(iter(windows.values()))  # "train" or "val" marker string
+        calls.append((which, cfg.rsi_bull_level))
+        return results[(which, cfg.rsi_bull_level)]
+
+    monkeypatch.setattr(tuner_mod, "candidate_params", lambda: [params_a, params_b])
+    monkeypatch.setattr(
+        tuner_mod, "split_windows",
+        lambda bars: tuner_mod.Windows(train={"SPY": "train"}, val={"SPY": "val"}),
+    )
+    monkeypatch.setattr(tuner_mod, "run_all", fake_run_all)
+
+    cfg = Settings(api_key="", secret_key="", rsi_bull_level=50.0)
+    outcome = tuner_mod.tune({"SPY": ([], [])}, cfg)
+
+    assert outcome.params == params_a
+    assert outcome.accepted
+    assert ("val", 45.0) not in calls  # B's validation was never evaluated
+
+
+@dataclass
+class FakeResult:
+    n: int
+    expectancy: float

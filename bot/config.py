@@ -112,6 +112,10 @@ class Settings:
     # Engine publishes its active shortlist here so the dashboard (a separate
     # process) can show what's being polled without re-ranking the universe.
     active_file: str = field(default="active.json")
+    # PID file: the single-instance lock so a second `python main.py` (or a
+    # dashboard "Start" click racing a still-running engine) refuses to start
+    # rather than double-trading the same account.
+    lock_file: str = field(default="engine.pid")
 
     def validate(self) -> None:
         if not self.dry_run and (not self.api_key or not self.secret_key):

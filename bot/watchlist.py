@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from bot.atomic import atomic_write_text
+
 
 @dataclass(frozen=True)
 class ActiveEntry:
@@ -30,7 +32,7 @@ def save_active(path: str, ranked_at: datetime, entries: list[ActiveEntry]) -> N
         "ranked_at": ranked_at.isoformat(),
         "entries": [asdict(e) for e in entries],
     }
-    Path(path).write_text(json.dumps(payload, indent=2))
+    atomic_write_text(path, json.dumps(payload, indent=2))
 
 
 def load_active(path: str) -> ActiveShortlist:

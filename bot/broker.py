@@ -229,6 +229,7 @@ class AlpacaBroker:
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.DAY,
                 limit_price=limit,
+                client_order_id=self._client_order_id("buy", contract.symbol),
             )
         )
         log.info("submitted BUY %d x %s limit %.2f (order %s)",
@@ -252,10 +253,21 @@ class AlpacaBroker:
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce.DAY,
                 limit_price=round_tick(bid),
+                client_order_id=self._client_order_id("sell", occ_symbol),
             )
         )
         log.info("submitted SELL %d x %s limit %.2f (order %s)",
                  qty, occ_symbol, round_tick(bid), order.id)
+
+    @staticmethod
+    def _client_order_id(side: str, occ_symbol: str) -> str:
+        """Deterministic per (side, contract, day): a genuine accidental
+        resubmit of the same intent (e.g. a retry after a timed-out response
+        whose order actually went through) is rejected by Alpaca's
+        client_order_id uniqueness constraint instead of silently opening a
+        second position."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        return f"{side}-{occ_symbol}-{today}"[:128]
 
     # --- market data ---
 

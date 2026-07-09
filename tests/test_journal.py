@@ -6,9 +6,9 @@ from bot.broker import Fill
 T0 = datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc)
 
 
-def fill(order_id, side, price, ts=T0, symbol="SPY260716C00120000"):
+def fill(order_id, side, price, ts=T0, symbol="SPY260716C00120000", qty=1):
     return Fill(order_id=order_id, filled_at=ts, symbol=symbol,
-                underlying="SPY", side=side, qty=1, price=price)
+                underlying="SPY", side=side, qty=qty, price=price)
 
 
 def test_buy_then_sell_realizes_pnl(tmp_path):
@@ -39,6 +39,35 @@ def test_fifo_matching_two_round_trips(tmp_path):
     rows = journal.read_rows(path)
     assert rows[1]["realized_pnl"] == "20.00"    # 1.20 vs 1.00
     assert rows[3]["realized_pnl"] == "-60.00"   # 1.40 vs 2.00
+
+
+def test_partial_sell_consumes_only_part_of_the_lot(tmp_path):
+    """A qty-2 buy partially closed by a qty-1 sell must only retire half the
+    lot: matching by row count (instead of remaining quantity) would treat
+    the lot as fully consumed after the first sell and mismatch the next one."""
+    path = str(tmp_path / "trades.csv")
+    journal.append_fills(path, [fill("b1", "buy", 1.00, qty=2)])
+    journal.append_fills(path, [fill("s1", "sell", 1.50, ts=T0 + timedelta(hours=1), qty=1)])
+    journal.append_fills(path, [fill("s2", "sell", 1.20, ts=T0 + timedelta(hours=2), qty=1)])
+    rows = journal.read_rows(path)
+    # Both sells matched against the SAME qty-2 buy lot at 1.00, not against
+    # a second (nonexistent) buy.
+    assert rows[1]["realized_pnl"] == "50.00"   # (1.50 - 1.00) * 100 * 1
+    assert rows[2]["realized_pnl"] == "20.00"   # (1.20 - 1.00) * 100 * 1
+
+
+def test_sell_spanning_two_buy_lots_blends_cost_basis(tmp_path):
+    """A qty-2 sell against two qty-1 buys at different prices must realize
+    P&L against each lot's own entry price (FIFO), not a single flat price."""
+    path = str(tmp_path / "trades.csv")
+    journal.append_fills(path, [
+        fill("b1", "buy", 1.00, qty=1),
+        fill("b2", "buy", 2.00, ts=T0 + timedelta(hours=1), qty=1),
+        fill("s1", "sell", 1.50, ts=T0 + timedelta(hours=2), qty=2),
+    ])
+    rows = journal.read_rows(path)
+    # (1.50-1.00)*100*1 + (1.50-2.00)*100*1 = 50 - 50 = 0
+    assert rows[2]["realized_pnl"] == "0.00"
 
 
 def test_entry_time_open_position(tmp_path):
