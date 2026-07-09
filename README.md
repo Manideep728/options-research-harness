@@ -153,6 +153,27 @@ window itself — selection bias inflates that number, so treat it as stale.
 Re-run `backtest.py --tune` to regenerate evidence under the corrected
 train-then-validate selection above.
 
+## Research loop (`research/`)
+
+A guarded self-improvement pipeline, separate from the live bot (the engine
+never imports it). The cycle:
+
+```powershell
+.venv\Scripts\python -m research fetch            # cache bars once; splits off a quarantined holdout
+.venv\Scripts\python -m research search --family baseline   # select on TRAIN, judge on validation
+.venv\Scripts\python -m research report           # failure analysis of train trades (you read this)
+.venv\Scripts\python -m research robustness       # simulator-perturbation + daily regime checks
+.venv\Scripts\python -m research gate             # burn-once out-of-sample verdict
+```
+
+Families: `baseline` (live EMA+RSI), `ema_slope`, `donchian`, `rsi_only`
+(control). Honesty machinery: every candidate ever scored is logged to an
+append-only `research/trials.jsonl`; the acceptance score is a **deflated
+Sharpe** (your Sharpe vs. the best of N logged tries); the holdout window is
+**burned** after one gate attempt — pass or fail — and a repeat is refused
+until new data accrues. A gate pass prints evidence for *manual* review;
+nothing auto-deploys, and risk caps are not in any search space.
+
 ## Tests
 
 ```powershell

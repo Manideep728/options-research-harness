@@ -14,3 +14,7 @@ engine.pid
 web/.next/
 web/node_modules/
 .claude/scheduled_tasks.lock
+research/data/
+research/trials.jsonl
+research/candidate.json
+research/report.txt
