@@ -1,8 +1,12 @@
 """Self-improvement with hard guidelines.
 
 The tuner may ONLY propose values for the signal/exit parameters listed in
-config.TUNABLE_BOUNDS, and a proposal is only accepted when ALL of these
-hold on walk-forward validation data the candidate never saw during ranking:
+config.TUNABLE_BOUNDS. Candidates are ranked and picked on the TRAINING
+window only; the validation window is touched exactly once, to check the
+single winner, so it stays genuinely unseen by the selection process
+(ranking on validation, then reporting that same score as evidence, is
+selection bias — across ~200 grid candidates the best validation score would
+be partly luck). A proposal is only accepted when ALL of these hold:
 
   1. Risk caps (position limits, sizing, daily limits, circuit breaker) are
      untouchable — they are not in the search space at all.
@@ -10,17 +14,12 @@ hold on walk-forward validation data the candidate never saw during ranking:
      again when the bot loads tuned_params.json).
   3. >= MIN_TRADES trades on BOTH the training and validation windows —
      no conclusions from a handful of lucky trades.
-  4. Validation expectancy must be positive AND beat the current
-     parameters' validation expectancy by IMPROVE_FACTOR (or by an absolute
-     margin when the current expectancy is not positive).
+  4. The winner's validation expectancy must be positive AND beat the
+     current parameters' validation expectancy by IMPROVE_FACTOR (or by an
+     absolute margin when the current expectancy is not positive).
 
 If nothing qualifies, the current parameters stand. Every accepted change is
 written to tuned_params.json WITH its evidence, so it can be audited later.
-
-Caveat, stated plainly: the winner is selected on the validation window, so
-across a few hundred candidates the reported expectancy is an optimistic
-upper bound, not a promise. The margin + sample-size guidelines temper this;
-the live risk caps are what actually contain the damage when it's wrong.
 """
 
 import itertools
@@ -28,8 +27,8 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
 
+from bot.atomic import atomic_write_text
 from bot.config import Settings, clamp_tunables
 from bot.simulator import SimParams, SimResult, simulate
 
@@ -102,25 +101,34 @@ def candidate_params() -> list[dict]:
 
 def tune(bars_by_symbol: dict[str, tuple[list[float], list]], cfg: Settings,
          sp: SimParams = SimParams()) -> TuneOutcome:
+    """Pick the winner on TRAIN expectancy only, then check that one winner
+    against validation. Ranking on validation (like picking whichever
+    candidate scores highest on val, then reporting that same score as
+    evidence) is selection bias: across ~200 grid candidates the best
+    validation score is partly luck, so it would overstate the edge by
+    construction. Scoring on train and validating once keeps validation data
+    genuinely unseen by the selection process."""
     w = split_windows(bars_by_symbol)
     current_val = run_all(w.val, cfg, sp)
 
-    best_val: SimResult | None = None
+    best_train: SimResult | None = None
     best_params: dict = {}
     for params in candidate_params():
         candidate_cfg = replace(cfg, **params)
         train_result = run_all(w.train, candidate_cfg, sp)
         if train_result.n < MIN_TRADES:  # guideline 3 (train side)
             continue
-        val_result = run_all(w.val, candidate_cfg, sp)
-        if val_result.n < MIN_TRADES:  # guideline 3 (validation side)
-            continue
-        if best_val is None or val_result.expectancy > best_val.expectancy:
-            best_val, best_params = val_result, params
+        if best_train is None or train_result.expectancy > best_train.expectancy:
+            best_train, best_params = train_result, params
 
-    if best_val is None:
-        return TuneOutcome(False, "no candidate produced enough validation trades",
+    if best_train is None:
+        return TuneOutcome(False, "no candidate produced enough training trades",
                            {}, current_val, None)
+
+    best_val = run_all(w.val, replace(cfg, **best_params), sp)
+    if best_val.n < MIN_TRADES:  # guideline 3 (validation side)
+        return TuneOutcome(False, "winning candidate lacked enough validation trades",
+                           best_params, current_val, best_val)
     if best_val.expectancy <= 0:  # guideline 4
         return TuneOutcome(False, "best candidate still has non-positive expectancy",
                            best_params, current_val, best_val)
@@ -152,5 +160,5 @@ def write_tuned_params(path: str, outcome: TuneOutcome) -> None:
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    Path(path).write_text(json.dumps(payload, indent=2))
+    atomic_write_text(path, json.dumps(payload, indent=2))
     log.info("wrote %s: %s", path, outcome.params)

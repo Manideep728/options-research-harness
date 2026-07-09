@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bot.atomic import atomic_write_text
+
 
 @dataclass
 class ControlState:
@@ -28,5 +30,5 @@ def load_control(path: str) -> ControlState:
 
 def save_control(path: str, paused: bool) -> ControlState:
     state = ControlState(paused=paused, updated_at=datetime.now(timezone.utc).isoformat())
-    Path(path).write_text(json.dumps(asdict(state), indent=2))
+    atomic_write_text(path, json.dumps(asdict(state), indent=2))
     return state

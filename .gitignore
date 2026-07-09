@@ -7,7 +7,10 @@ control.json
 active.json
 trades.csv
 bot.log
+bot.log.*
 earnings.json
+engine.pid
 .pytest_cache/
 web/.next/
 web/node_modules/
+.claude/scheduled_tasks.lock

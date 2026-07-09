@@ -9,6 +9,10 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      // Required by the API's CSRF guard on mutating requests: a custom
+      // header forces the browser to run a CORS preflight, which the API's
+      // restrictive allow_origins rejects for any site but this dashboard.
+      "X-Dashboard-Client": "1",
       ...(init?.headers ?? {}),
     },
   });
