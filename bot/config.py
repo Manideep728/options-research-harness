@@ -109,6 +109,9 @@ class Settings:
     journal_file: str = field(default="trades.csv")
     tuned_params_file: str = field(default="tuned_params.json")
     earnings_file: str = field(default="earnings.json")
+    # Engine publishes its active shortlist here so the dashboard (a separate
+    # process) can show what's being polled without re-ranking the universe.
+    active_file: str = field(default="active.json")
 
     def validate(self) -> None:
         if not self.dry_run and (not self.api_key or not self.secret_key):

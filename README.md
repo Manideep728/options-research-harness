@@ -105,8 +105,11 @@ start the trading loop** — `main.py` only runs once you explicitly start it.
 Equivalently, `.venv\Scripts\python run_dashboard.py` still launches the API
 and frontend together from the Python side, without npm.
 
-The dashboard reads live bot state from the API, shows the current signal and
-risk reasoning, and exposes two separate sets of controls:
+The dashboard reads live bot state from the API and shows the current signal
+and risk reasoning for the **active shortlist** (the top-ranked names the
+engine is actually polling, read from `active.json` — so a refresh costs a
+handful of data calls, not one per universe symbol), plus two separate sets of
+controls:
 
 - **Bot process** — Start/stop the trading loop (`main.py`) itself as an OS
   process. This is the on/off switch; nothing trades while it's stopped.
@@ -147,12 +150,13 @@ validation and should be read as an optimistic upper bound, not a promise.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-95 tests cover the indicator math (including a known Wilder RSI value), signal
-triggers, contract filters, every risk gate, journal P&L matching, the
+102 tests cover the indicator math (including a known Wilder RSI value),
+signal triggers, contract filters, every risk gate, journal P&L matching, the
 simulator (verified bar-for-bar identical to the live signal logic), the
 tuner guardrails (clamping, non-tunable risk caps, thin-evidence rejection),
-the scanner scoring/ranking, the earnings blackout, and full engine cycles
-against a fake broker (entries, exits, order reconciliation, stale-order
+the scanner scoring/ranking, the earnings blackout, the active-shortlist
+persistence, the dashboard snapshot (shortlist-only polling), and full engine
+cycles against a fake broker (entries, exits, order reconciliation, stale-order
 cancels, max-hold via journal, two-tier ranking, cooldown, blackout).
 
 ## Layout
@@ -171,6 +175,7 @@ bot/simulator.py   backtest engine + option P&L model (pure)
 bot/tuner.py       guarded grid search + walk-forward validation
 bot/journal.py     trades.csv fill journal, FIFO realized P&L
 bot/state.py       daily counters persisted to state.json
+bot/watchlist.py   active shortlist persisted to active.json (engine -> dashboard)
 bot/control.py     pause/resume flag shared with the dashboard
 bot/dashboard.py   live snapshot builder for the dashboard API
 bot/broker.py      the ONLY module that talks to Alpaca; DRY_RUN lives here

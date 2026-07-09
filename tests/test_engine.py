@@ -3,7 +3,7 @@
 import json
 from datetime import date, datetime, timedelta, timezone
 
-from bot import journal
+from bot import journal, watchlist
 from bot.broker import ClockInfo, Fill, OpenOrder
 from bot.config import Settings
 from bot.engine import Engine
@@ -93,6 +93,7 @@ def cfg_for(tmp_path, **overrides) -> Settings:
         state_file=str(tmp_path / "state.json"),
         journal_file=str(tmp_path / "trades.csv"),
         control_file=str(tmp_path / "control.json"),
+        active_file=str(tmp_path / "active.json"),
         # Point at a (by default absent) tmp file so tests never pick up the
         # repo's earnings.json and accidentally black a symbol out.
         earnings_file=overrides.pop("earnings_file", str(tmp_path / "earnings.json")),
@@ -290,3 +291,13 @@ def test_earnings_blackout_keeps_symbol_off_shortlist(tmp_path):
     engine.run_cycle()
     assert engine._active == ()          # blacked out -> no polling slot
     assert broker.bought == []           # and therefore no trade
+
+
+def test_refresh_publishes_shortlist_to_active_file(tmp_path):
+    # The dashboard is a separate process, so the shortlist must land on disk.
+    broker = FakeBroker({"SPY": bounce_closes(), "QQQ": flat_closes()})
+    cfg = cfg_for(tmp_path, symbols=("SPY", "QQQ"), active_list_size=1)
+    Engine(broker, cfg).run_cycle()
+    shortlist = watchlist.load_active(cfg.active_file)
+    assert [e.symbol for e in shortlist.entries] == ["SPY"]
+    assert shortlist.ranked_at is not None
