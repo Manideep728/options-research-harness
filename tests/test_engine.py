@@ -93,6 +93,9 @@ def cfg_for(tmp_path, **overrides) -> Settings:
         state_file=str(tmp_path / "state.json"),
         journal_file=str(tmp_path / "trades.csv"),
         control_file=str(tmp_path / "control.json"),
+        # Point at a (by default absent) tmp file so tests never pick up the
+        # repo's earnings.json and accidentally black a symbol out.
+        earnings_file=overrides.pop("earnings_file", str(tmp_path / "earnings.json")),
         **overrides,
     )
 
@@ -215,3 +218,75 @@ def test_max_hold_exit_uses_journal_entry_time(tmp_path):
     broker = FakeBroker({"SPY": flat_closes()}, positions=[spy_position()])
     Engine(broker, cfg).run_cycle()
     assert broker.closed == ["SPY260716C00120000"]
+
+
+# --- two-tier scan: ranking, cooldown, blackout ---
+
+def test_only_top_ranked_symbols_are_polled(tmp_path):
+    # Universe of two; only one is set up. With room for one active name,
+    # the flat one must not make the shortlist and must not be evaluated.
+    broker = FakeBroker({"SPY": bounce_closes(), "QQQ": flat_closes()})
+    engine = Engine(broker, cfg_for(tmp_path, symbols=("SPY", "QQQ"), active_list_size=1))
+    engine.run_cycle()
+    assert engine._active == ("SPY",)
+    assert broker.bought == ["SPY260716C00120000"]
+
+
+def test_cooldown_suppresses_repeat_signal_same_bar(tmp_path):
+    # Same clock time on both cycles: the second identical signal is on
+    # cooldown and must not place a second order.
+    broker = FakeBroker({"SPY": bounce_closes()})
+    engine = Engine(broker, cfg_for(tmp_path))
+    engine.run_cycle()
+    engine.run_cycle()
+    assert broker.bought == ["SPY260716C00120000"]  # exactly one, not two
+
+
+def test_signal_refires_after_cooldown_expires(tmp_path):
+    broker = FakeBroker({"SPY": bounce_closes()})
+    cfg = cfg_for(tmp_path, signal_cooldown_sec=300)
+    engine = Engine(broker, cfg)
+    engine.run_cycle()
+    # Push the recorded fire time back beyond the cooldown window.
+    engine._last_signal[("SPY", "BUY_CALL")] = NOW - timedelta(seconds=301)
+    engine.run_cycle()
+    assert broker.bought == ["SPY260716C00120000", "SPY260716C00120000"]
+
+
+def test_active_list_reranks_only_when_due(tmp_path):
+    broker = FakeBroker({"SPY": bounce_closes(), "QQQ": flat_closes()})
+    cfg = cfg_for(tmp_path, symbols=("SPY", "QQQ"), active_list_size=1,
+                  scan_interval_sec=1800)
+    engine = Engine(broker, cfg)
+    engine.run_cycle()
+    assert engine._active == ("SPY",)
+
+    # Flip which symbol is set up, then run again inside the interval: the
+    # shortlist must be unchanged because we haven't re-ranked yet.
+    broker.closes_by_symbol = {"SPY": flat_closes(), "QQQ": bounce_closes()}
+    engine.run_cycle()
+    assert engine._active == ("SPY",)
+
+    # Age the last-ranked stamp past the interval; now it re-ranks to QQQ.
+    engine._last_ranked = NOW - timedelta(seconds=1801)
+    engine.run_cycle()
+    assert engine._active == ("QQQ",)
+
+
+def test_earnings_blackout_keeps_symbol_off_shortlist(tmp_path):
+    earnings_file = tmp_path / "earnings.json"
+    earnings_file.write_text(json.dumps({"AAPL": NOW.date().isoformat()}))
+    broker = FakeBroker(
+        {"AAPL": bounce_closes()},
+        chain=[Contract(
+            symbol="AAPL260716C00120000", underlying="AAPL",
+            expiry=TODAY + timedelta(days=10), strike=120.0, call_put="call",
+            bid=1.00, ask=1.05, open_interest=5000,
+        )],
+    )
+    engine = Engine(broker, cfg_for(
+        tmp_path, symbols=("AAPL",), earnings_file=str(earnings_file)
+    ))
+    engine.run_cycle()
+    assert engine._active == ()          # blacked out -> no polling slot
+    assert broker.bought == []           # and therefore no trade

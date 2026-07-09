@@ -6,6 +6,7 @@ state.json
 control.json
 trades.csv
 bot.log
+earnings.json
 .pytest_cache/
 web/.next/
 web/node_modules/
