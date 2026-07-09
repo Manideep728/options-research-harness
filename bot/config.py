@@ -39,9 +39,24 @@ class Settings:
     dry_run: bool = os.getenv("DRY_RUN", "true").strip().lower() != "false"
 
     # --- universe & cadence ---
-    # Index ETFs only: no earnings gaps, tightest option spreads.
-    symbols: tuple[str, ...] = ("SPY", "QQQ")
-    loop_interval_sec: int = 60
+    # 30-name watchlist: ~10 liquid index/sector ETFs (no earnings gaps) plus
+    # ~20 mega-caps for movement and to decorrelate the shortlist. Individual
+    # names carry earnings-gap risk, mitigated by the earnings blackout below.
+    symbols: tuple[str, ...] = (
+        # ETFs
+        "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "SMH", "GLD", "TLT",
+        # mega-cap tech / growth
+        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
+        "AVGO", "NFLX",
+        # mega-cap financials / staples / energy / health
+        "JPM", "V", "MA", "COST", "HD", "WMT", "JNJ", "XOM", "CVX", "BAC",
+    )
+    # Two-tier scan: rank all `symbols` on a slow cadence, then poll only the
+    # top `active_list_size` on the fast `loop_interval_sec`.
+    loop_interval_sec: int = 30           # fast poll of the active shortlist
+    scan_interval_sec: int = 1800         # re-rank the full universe every 30 min
+    active_list_size: int = 5             # how many top-ranked names to poll
+    signal_cooldown_sec: int = 1800       # per (symbol, action): suppress repeats
     bar_timeframe_minutes: int = 15
     bar_history_count: int = 100
     skip_open_minutes: int = 15   # no entries in first 15 min of session
@@ -57,6 +72,12 @@ class Settings:
     # resumption, firing roughly once per couple of days per symbol.
     rsi_bull_level: float = 45.0  # RSI crossing back UP through this = bullish trigger
     rsi_bear_level: float = 55.0  # RSI crossing back DOWN through this = bearish trigger
+
+    # --- earnings blackout (single-name gap protection) ---
+    # Skip entries on a symbol whose earnings fall within this many days of
+    # today, in either direction — we hold up to max_hold_days across
+    # overnights, and an earnings gap can open straight through the stop.
+    earnings_blackout_days: int = 3
 
     # --- contract selection ---
     min_dte: int = 7
@@ -87,6 +108,7 @@ class Settings:
     log_file: str = field(default="bot.log")
     journal_file: str = field(default="trades.csv")
     tuned_params_file: str = field(default="tuned_params.json")
+    earnings_file: str = field(default="earnings.json")
 
     def validate(self) -> None:
         if not self.dry_run and (not self.api_key or not self.secret_key):

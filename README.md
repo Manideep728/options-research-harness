@@ -1,10 +1,12 @@
 # Options Paper-Trading Bot
 
-Automatic options trading bot for an **Alpaca paper account**. On a 60-second
-loop during market hours it pulls 15-minute bars, computes EMA/RSI, and — when
-the strict rules line up — buys a single call or put with a marketable limit
-order, then manages the exit. Long options only: maximum possible loss on any
-trade is the premium paid.
+Automatic options trading bot for an **Alpaca paper account**. It watches a
+30-name universe with a **two-tier scan**: every 30 minutes it ranks the whole
+universe for "likely to produce a tradeable signal soon" and keeps the top 5;
+every 30 seconds it polls just those 5, computes EMA/RSI, and — when the strict
+rules line up — buys a single call or put with a marketable limit order, then
+manages the exit. Long options only: maximum possible loss on any trade is the
+premium paid.
 
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
 endpoint. Nothing here is financial advice; the strategy is a disciplined
@@ -14,8 +16,25 @@ accumulates.
 
 ## Strategy (defaults in `bot/config.py`, tunables in `tuned_params.json`)
 
-**Entry** — evaluated per symbol (`SPY, QQQ` — index ETFs only: no earnings
-gaps, tightest option spreads) on the latest closed 15-minute bar:
+**Universe & two-tier scan** — the watchlist is 30 names: ~10 liquid index/
+sector ETFs plus ~20 mega-caps (for movement and to decorrelate the
+shortlist). Scanning them all every 30 s would be slow, so:
+
+- **Rank tier (every 30 min):** score all 30 on `score = trend_clarity ×
+  rsi_proximity × recent_volatility` (`bot/scanner.py`) — "primed to fire"
+  weighted by "actually moving." Keep the top 5 as the active shortlist.
+- **Poll tier (every 30 s):** evaluate only those 5 for entries.
+- **Trade cooldown:** once a signal fires on a `(symbol, action)` it is
+  suppressed for `signal_cooldown_sec` (30 min), so a fast poll can't
+  re-trigger the same setup every cycle.
+- **Earnings blackout:** single names within `earnings_blackout_days` (±3) of
+  earnings are dropped from the shortlist — an overnight earnings gap can open
+  straight through the stop. Dates come from a hand-maintained `earnings.json`
+  (see `earnings.example.json`); ETFs and unlisted symbols are never blacked
+  out.
+
+**Entry** — evaluated per shortlisted symbol on the latest closed 15-minute
+bar:
 
 | Condition | Buy CALL | Buy PUT |
 |---|---|---|
@@ -62,8 +81,9 @@ values in `.env`.
   **logged, not submitted**. Start here.
 - `DRY_RUN=false`: orders are submitted to your **paper** account.
 
-Every cycle logs each symbol's indicator readings and the decision reason
-(enter / skip / hold / exit) to the console and `bot.log`. Daily trade counts
+Every cycle logs the shortlist's indicator readings and the decision reason
+(enter / skip / hold / exit) to the console and `bot.log`, and each re-rank
+logs the new top-5 with their scores. Daily trade counts
 survive restarts via `state.json`; every fill is journaled to `trades.csv`
 with FIFO-matched realized P&L.
 
@@ -127,12 +147,13 @@ validation and should be read as an optimistic upper bound, not a promise.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-78 tests cover the indicator math (including a known Wilder RSI value), signal
+95 tests cover the indicator math (including a known Wilder RSI value), signal
 triggers, contract filters, every risk gate, journal P&L matching, the
 simulator (verified bar-for-bar identical to the live signal logic), the
 tuner guardrails (clamping, non-tunable risk caps, thin-evidence rejection),
-and full engine cycles against a fake broker (entries, exits, order
-reconciliation, stale-order cancels, max-hold via journal).
+the scanner scoring/ranking, the earnings blackout, and full engine cycles
+against a fake broker (entries, exits, order reconciliation, stale-order
+cancels, max-hold via journal, two-tier ranking, cooldown, blackout).
 
 ## Layout
 
@@ -141,7 +162,9 @@ main.py            entry point (logging, config validation, loop start)
 backtest.py        backtest / self-tune CLI
 bot/config.py      every tunable + TUNABLE_BOUNDS + clamped tuned-param loading
 bot/indicators.py  EMA / Wilder RSI (pure math)
+bot/scanner.py     universe ranking: hybrid vol-weighted "primed" score (pure)
 bot/strategy.py    signal logic (pure)
+bot/earnings.py    earnings blackout gate + earnings.json loader
 bot/options.py     contract selection + liquidity gates (pure)
 bot/risk.py        entry gates, sizing, exit rules incl. max hold (pure)
 bot/simulator.py   backtest engine + option P&L model (pure)
@@ -151,7 +174,7 @@ bot/state.py       daily counters persisted to state.json
 bot/control.py     pause/resume flag shared with the dashboard
 bot/dashboard.py   live snapshot builder for the dashboard API
 bot/broker.py      the ONLY module that talks to Alpaca; DRY_RUN lives here
-bot/engine.py      the loop: clock -> reconcile -> exits -> entries -> sleep
+bot/engine.py      the loop: clock -> reconcile -> exits -> re-rank (due) -> poll shortlist -> sleep
 dashboard_api.py   FastAPI backend for the web dashboard; also starts/stops main.py on request
 run_dashboard.py   launches API + web frontend together (Python-side alternative to npm run dev)
 web/               Next.js dashboard frontend

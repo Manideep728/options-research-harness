@@ -8,7 +8,7 @@ import logging
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
-from bot import control, journal, risk, state
+from bot import control, earnings, journal, risk, scanner, state
 from bot.config import Settings
 from bot.options import pick_contract
 from bot.strategy import Action, evaluate
@@ -21,13 +21,20 @@ class Engine:
         self.broker = broker
         self.cfg = cfg
         self._session_open_cache: tuple[date, object] | None = None
+        # Two-tier scan state: the shortlist the fast loop polls, and when it
+        # was last re-ranked from the full universe.
+        self._active: tuple[str, ...] = ()
+        self._last_ranked: datetime | None = None
+        # Per (symbol, action) time a signal last fired — the trade cooldown.
+        self._last_signal: dict[tuple[str, str], datetime] = {}
 
     # --- public API ---
 
     def run_forever(self) -> None:
         log.info(
-            "starting loop: symbols=%s interval=%ss dry_run=%s",
-            ",".join(self.cfg.symbols), self.cfg.loop_interval_sec, self.cfg.dry_run,
+            "starting loop: universe=%d poll=%ss rank=%ss top=%d dry_run=%s",
+            len(self.cfg.symbols), self.cfg.loop_interval_sec,
+            self.cfg.scan_interval_sec, self.cfg.active_list_size, self.cfg.dry_run,
         )
         while True:
             try:
@@ -61,6 +68,7 @@ class Engine:
 
         if not self._in_entry_window(clock):
             return
+        self._refresh_active_list(clock.now)
         self.scan_entries(clock, positions, open_orders, fills)
 
     # --- exits ---
@@ -112,12 +120,22 @@ class Engine:
             for o in open_buys
         ]
 
-        for symbol in self.cfg.symbols:
+        for symbol in self._active:
             closes = self.broker.get_closes(symbol)
             signal = evaluate(closes, self.cfg)
             log.info("%s: %s -> %s", symbol, signal.action.value, signal.reason)
             if signal.action == Action.NONE:
                 continue
+
+            # Cooldown: a signal that already fired within the window is
+            # suppressed here — before the chain fetch — so the same setup
+            # can't re-trigger (or re-spam) on every 30s poll. We record the
+            # fire now, so ALL downstream outcomes (entered, gated, no
+            # contract) share one cooldown, not just successful entries.
+            if self._on_cooldown(symbol, signal.action, clock.now):
+                log.info("SKIP %s: %s on cooldown", symbol, signal.action.value)
+                continue
+            self._mark_fired(symbol, signal.action, clock.now)
 
             gate = risk.entry_allowed(
                 symbol, gate_positions, trades_today, equity, day.day_start_equity, self.cfg
@@ -162,6 +180,49 @@ class Engine:
                     days_to_expiry=(contract.expiry - today).days,
                 )
             )
+
+    # --- ranking (slow tier) ---
+
+    def _refresh_active_list(self, now: datetime) -> None:
+        """Re-rank the full universe into the shortlist the fast loop polls —
+        but only once per scan_interval_sec. Between refreshes this is a cheap
+        timestamp check and returns immediately, so the fast loop stays fast."""
+        due = (
+            self._last_ranked is None
+            or (now - self._last_ranked).total_seconds() >= self.cfg.scan_interval_sec
+        )
+        if not due:
+            return
+
+        closes_by_symbol = {sym: self.broker.get_closes(sym) for sym in self.cfg.symbols}
+        ranked = scanner.rank_symbols(closes_by_symbol, self.cfg)
+
+        # Drop names in earnings blackout so they never occupy a polling slot.
+        dates = earnings.load_earnings_dates(self.cfg.earnings_file)
+        eligible = [
+            s for s in ranked
+            if not earnings.in_blackout(
+                s.symbol, now.date(), dates, self.cfg.earnings_blackout_days
+            )
+        ]
+        top = eligible[: self.cfg.active_list_size]
+        self._active = tuple(s.symbol for s in top)
+        self._last_ranked = now
+
+        log.info("re-ranked %d symbols -> active shortlist:", len(ranked))
+        for s in top:
+            log.info("  %-6s score=%.6f  %s", s.symbol, s.score, s.detail)
+
+    # --- cooldown ---
+
+    def _on_cooldown(self, symbol: str, action: Action, now: datetime) -> bool:
+        last = self._last_signal.get((symbol, action.value))
+        if last is None:
+            return False
+        return (now - last).total_seconds() < self.cfg.signal_cooldown_sec
+
+    def _mark_fired(self, symbol: str, action: Action, now: datetime) -> None:
+        self._last_signal[(symbol, action.value)] = now
 
     # --- helpers ---
 
