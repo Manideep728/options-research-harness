@@ -13,6 +13,7 @@ future auto-proposer can escape the rails.
 
 import itertools
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 from bot.indicators import ema, rsi
@@ -20,12 +21,17 @@ from bot.strategy import Action
 
 RSI_PERIOD = 14  # fixed, as in the live bot
 
+# Signal contract: (closes, times, params) -> list[Action], causal.
+# `times` (bar timestamps, parallel to closes) exists for blocks that need
+# the clock (e.g. entry-hour filters); the built-in families ignore it.
+SignalFn = Callable[[list[float], "list[datetime] | None", dict], "list[Action]"]
+
 
 @dataclass(frozen=True)
 class Family:
     name: str
     description: str
-    signal: Callable[[list[float], dict], list["Action"]]
+    signal: SignalFn
     grid: dict[str, list]                       # signal params only
     bounds: dict[str, tuple[float, float]]
 
@@ -46,7 +52,7 @@ def _rsi_cross(rsi_prev: float, rsi_now: float, bull: float, bear: float,
     return Action.NONE
 
 
-def ema_cross_rsi(closes: list[float], p: dict) -> list[Action]:
+def ema_cross_rsi(closes: list[float], times, p: dict) -> list[Action]:
     """The live strategy's structure: EMA fast/slow trend filter + RSI cross."""
     fast, slow = int(p["ema_fast"]), int(p["ema_slow"])
     needed = max(slow, RSI_PERIOD + 1) + 1
@@ -61,7 +67,7 @@ def ema_cross_rsi(closes: list[float], p: dict) -> list[Action]:
     return out
 
 
-def ema_slope_rsi(closes: list[float], p: dict) -> list[Action]:
+def ema_slope_rsi(closes: list[float], times, p: dict) -> list[Action]:
     """Trend = slope of the slow EMA over `slope_bars` (rising/falling),
     instead of the fast/slow cross. Same RSI trigger."""
     slow, k = int(p["ema_slow"]), int(p["slope_bars"])
@@ -77,7 +83,7 @@ def ema_slope_rsi(closes: list[float], p: dict) -> list[Action]:
     return out
 
 
-def rsi_no_trend(closes: list[float], p: dict) -> list[Action]:
+def rsi_no_trend(closes: list[float], times, p: dict) -> list[Action]:
     """Control family: RSI cross with NO trend filter. If this scores as
     well as the filtered families, the trend filter is doing nothing."""
     needed = RSI_PERIOD + 2
@@ -91,7 +97,7 @@ def rsi_no_trend(closes: list[float], p: dict) -> list[Action]:
     return out
 
 
-def donchian_breakout(closes: list[float], p: dict) -> list[Action]:
+def donchian_breakout(closes: list[float], times, p: dict) -> list[Action]:
     """Momentum family: close breaks above the prior `lookback`-bar high ->
     call; below the prior low -> put. Structurally unlike the RSI families."""
     n = int(p["lookback"])

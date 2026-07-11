@@ -48,3 +48,32 @@ them in a future session.
     the same idea twice and pretending it's new evidence, (b) the
     iterate-until-lucky trap, (c) the simulator being gamed, (d) peeking at
     the final exam?
+
+## Phase 2 (LLM proposer)
+
+11. **blocks.py** — The proposer emits JSON specs combining fixed blocks
+    instead of writing Python signal functions. Name two distinct failure
+    modes of an LLM-in-the-loop that this single design decision eliminates.
+
+12. **spec grid cap** — `MAX_CANDIDATES` limits how many combinations one
+    spec may try, and the prompt tells Claude "each extra candidate raises
+    the deflated-Sharpe bar for the whole research program." Explain the
+    mechanism: how does a bigger grid literally make the gate harder to pass?
+
+13. **structured outputs** — The API call uses
+    `output_config.format` with a JSON schema, yet we still run
+    `validate_spec()` on the result and give one retry. If the schema already
+    guarantees valid JSON of the right shape, what class of errors is the
+    validator catching that the schema cannot?
+
+14. **times parameter** — Adding the `entry_hours` block forced the signal
+    contract to change from `(closes, params)` to `(closes, times, params)`
+    across every family. Why couldn't the hour filter be implemented from
+    `closes` alone, and why was changing the shared contract better than
+    special-casing spec families?
+
+15. **who guards the guardrails** — The proposer can suggest specs but cannot
+    invoke the gate, and proposals land in files a human runs manually. If we
+    later automate `propose -> search` in a loop overnight, which single
+    number in the registry becomes the most important thing to watch, and
+    what does it protect?

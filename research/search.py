@@ -45,6 +45,7 @@ class SearchOutcome:
     train: SimResult | None
     val: SimResult | None
     baseline_val: SimResult | None
+    spec: dict | None = None   # set when the family came from a proposal spec
 
 
 def run_family(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
@@ -54,7 +55,7 @@ def run_family(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
     for symbol, (closes, times) in windows.items():
         result = simulate(
             closes, times, cfg, sp,
-            signal_fn=lambda c, p=signal_params: family.signal(c, p),
+            signal_fn=lambda c, t=times, p=signal_params: family.signal(c, t, p),
             symbol=symbol,
         )
         combined.trades.extend(result.trades)
@@ -71,23 +72,56 @@ def split_all(bars_by_symbol: dict[str, Bars]) -> tuple[dict[str, Bars], dict[st
     return train_w, val_w
 
 
+def resolve_family(candidate: dict) -> Family:
+    """A candidate.json either names a built-in family or embeds a spec."""
+    if candidate.get("spec"):
+        from research import blocks
+        return blocks.spec_to_family(candidate["spec"])
+    return FAMILIES[candidate["family"]]
+
+
+def _with_exits(signal_candidates_list: list[dict]) -> list[tuple[dict, dict]]:
+    return [
+        (sig, clamp_tunables(dict(zip(EXIT_GRID.keys(), exits))))
+        for sig in signal_candidates_list
+        for exits in itertools.product(*EXIT_GRID.values())
+    ]
+
+
 def search_family(family_name: str, cfg: Settings, sp: SimParams = SimParams(),
                   data_dir: Path = data.DATA_DIR,
                   registry_path: Path = registry.DEFAULT_PATH,
                   candidate_path: Path = CANDIDATE_PATH) -> SearchOutcome:
     family = FAMILIES[family_name]
+    return _search(family, _with_exits(signal_candidates(family)), cfg, sp,
+                   data_dir, registry_path, candidate_path)
+
+
+def search_spec(spec: dict, cfg: Settings, sp: SimParams = SimParams(),
+                data_dir: Path = data.DATA_DIR,
+                registry_path: Path = registry.DEFAULT_PATH,
+                candidate_path: Path = CANDIDATE_PATH) -> SearchOutcome:
+    """Search a proposal-spec family through the exact same pipeline."""
+    from research import blocks
+    errors = blocks.validate_spec(spec)
+    if errors:
+        return SearchOutcome(False, f"invalid spec: {'; '.join(errors)}",
+                             spec.get("name", "?"), {}, {}, None, None, None)
+    family = blocks.spec_to_family(spec)
+    return _search(family, _with_exits(blocks.spec_candidates(spec)), cfg, sp,
+                   data_dir, registry_path, candidate_path, spec=spec)
+
+
+def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
+            sp: SimParams, data_dir: Path, registry_path: Path,
+            candidate_path: Path, spec: dict | None = None) -> SearchOutcome:
+    family_name = family.name
     bars = {s: data.load_bars("intraday", s, data_dir) for s in cfg.symbols}
     bars = {s: b for s, b in bars.items() if b[0]}
     if not bars:
         return SearchOutcome(False, "no cached bars — run `python -m research fetch`",
                              family_name, {}, {}, None, None, None)
     train_w, val_w = split_all(bars)
-
-    candidates = [
-        (sig, clamp_tunables(dict(zip(EXIT_GRID.keys(), exits))))
-        for sig in signal_candidates(family)
-        for exits in itertools.product(*EXIT_GRID.values())
-    ]
     log.info("searching %s: %d candidates", family_name, len(candidates))
 
     best_train: SimResult | None = None
@@ -119,6 +153,7 @@ def search_family(family_name: str, cfg: Settings, sp: SimParams = SimParams(),
                        "val", metrics.summarize([t.pnl_pct for t in val_res.trades]))
 
     outcome = _judge(family_name, best_sig, best_exit, best_train, val_res, baseline_val)
+    outcome.spec = spec
     if outcome.accepted:
         _write_candidate(candidate_path, outcome)
     return outcome
@@ -161,6 +196,8 @@ def _write_candidate(path: Path, o: SearchOutcome) -> None:
         },
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if o.spec is not None:
+        payload["spec"] = o.spec
     Path(path).write_text(json.dumps(payload, indent=2))
     log.info("wrote %s", path)
 
