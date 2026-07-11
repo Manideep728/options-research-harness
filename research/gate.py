@@ -22,8 +22,7 @@ from bot.simulator import SimParams, SimResult
 from bot.tuner import MIN_TRADES
 
 from research import data, metrics, registry
-from research.families import FAMILIES
-from research.search import run_family
+from research.search import resolve_family, run_family
 
 log = logging.getLogger("research.gate")
 
@@ -43,7 +42,7 @@ class GateOutcome:
 def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
              data_dir: Path = data.DATA_DIR,
              registry_path: Path = registry.DEFAULT_PATH) -> GateOutcome:
-    family = FAMILIES[candidate["family"]]
+    family = resolve_family(candidate)
     signal_params = candidate["signal_params"]
     exit_params = candidate.get("exit_params", {})
 

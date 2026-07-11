@@ -18,3 +18,5 @@ research/data/
 research/trials.jsonl
 research/candidate.json
 research/report.txt
+research/proposals/
+research/proposal_prompt.txt

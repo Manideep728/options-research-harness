@@ -174,6 +174,17 @@ Sharpe** (your Sharpe vs. the best of N logged tries); the holdout window is
 until new data accrues. A gate pass prints evidence for *manual* review;
 nothing auto-deploys, and risk caps are not in any search space.
 
+**Phase 2 — the LLM proposer.** `python -m research propose` sends the
+failure report + trial history to Claude, which proposes the next family as
+a JSON **spec** — a combination of fixed building blocks (`research/blocks.py`:
+trend x trigger x entry filters such as `max_entry_vol`, `entry_hours`,
+`calls_only`), never code. Specs are validated, clamped into bounds, capped
+in grid size, and searched via `search --spec research/proposals/<name>.json`
+through the identical pipeline with full registry logging. Requires
+`ANTHROPIC_API_KEY` in `.env`; without one, `propose --offline` writes the
+exact prompt to `research/proposal_prompt.txt` for any LLM (or you) to answer.
+The gate stays human-invoked and burn-once regardless of who proposed.
+
 ## Tests
 
 ```powershell

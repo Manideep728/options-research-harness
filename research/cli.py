@@ -1,14 +1,16 @@
-"""Research loop CLI: python -m research <fetch|search|report|robustness|gate>
+"""Research loop CLI: python -m research <fetch|search|report|propose|robustness|gate>
 
 The intended cycle:
     fetch  -> cache bars (once, and again when the holdout must roll forward)
-    search -> select-on-train winner for one family, judged on validation
+    search -> select-on-train winner for one family or spec, judged on validation
     report -> failure analysis of the winner's TRAIN trades (human reads this)
+    propose -> Claude turns the report into the next spec (--offline: prompt only)
     robustness -> SimParams perturbation + daily regime sign-check
     gate   -> the burn-once holdout verdict (refuses a burned window)
 """
 
 import argparse
+import json
 import logging
 import sys
 from dataclasses import replace
@@ -17,7 +19,7 @@ from pathlib import Path
 from bot.config import Settings
 from bot.simulator import SimParams, SimResult
 
-from research import data, failure_report, gate, registry, robustness, search
+from research import data, failure_report, gate, proposer, registry, robustness, search
 from research.families import FAMILIES
 
 log = logging.getLogger("research")
@@ -57,10 +59,17 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch.add_argument("--symbols", type=str, default="",
                          help="comma-separated subset (default: full universe)")
 
-    p_search = sub.add_parser("search", help="search one family, select on train")
-    p_search.add_argument("--family", choices=sorted(FAMILIES), required=True)
+    p_search = sub.add_parser("search", help="search one family or spec, select on train")
+    group = p_search.add_mutually_exclusive_group(required=True)
+    group.add_argument("--family", choices=sorted(FAMILIES))
+    group.add_argument("--spec", type=Path, help="path to a proposal spec JSON")
 
     sub.add_parser("report", help="failure analysis of the candidate (train trades)")
+    p_propose = sub.add_parser(
+        "propose", help="Claude proposes the next spec from the failure report")
+    p_propose.add_argument("--offline", action="store_true",
+                           help="write the prompt to a file instead of calling the API")
+    p_propose.add_argument("--report-file", type=Path, default=REPORT_PATH)
     sub.add_parser("robustness", help="perturbation + daily regime checks")
     sub.add_parser("gate", help="burn-once holdout verdict")
 
@@ -79,10 +88,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "search":
-        outcome = search.search_family(args.family, cfg, data_dir=args.data_dir,
-                                       registry_path=args.registry,
-                                       candidate_path=args.candidate)
-        print(f"\nsearch {args.family}: {'ACCEPTED' if outcome.accepted else 'REJECTED'} "
+        if args.spec:
+            spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+            outcome = search.search_spec(spec, cfg, data_dir=args.data_dir,
+                                         registry_path=args.registry,
+                                         candidate_path=args.candidate)
+        else:
+            outcome = search.search_family(args.family, cfg, data_dir=args.data_dir,
+                                           registry_path=args.registry,
+                                           candidate_path=args.candidate)
+        print(f"\nsearch {outcome.family}: {'ACCEPTED' if outcome.accepted else 'REJECTED'} "
               f"— {outcome.reason}")
         if outcome.train is not None:
             print(f"winner: signal={outcome.signal_params} exits={outcome.exit_params}")
@@ -92,8 +107,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"registry now holds {registry.trial_count(args.registry)} unique trials")
         return 0
 
+    if args.command == "propose":
+        result = proposer.propose(args.report_file, registry_path=args.registry,
+                                  offline=args.offline)
+        if result is None:
+            return 1
+        if "offline_prompt" in result:
+            print(f"prompt written to {result['offline_prompt']} — feed it to any LLM,"
+                  f"\nsave the spec JSON, then run: python -m research search --spec <file>")
+            return 0
+        print(f"\nproposal: {result['name']} — {result['hypothesis']}")
+        print(f"saved to {result['_path']}")
+        print(f"next: python -m research search --spec {result['_path']}")
+        return 0
+
     candidate = _require_candidate(args.candidate)
-    family = FAMILIES[candidate["family"]]
+    family = search.resolve_family(candidate)
     sig, exits = candidate["signal_params"], candidate.get("exit_params", {})
     run_cfg = replace(cfg, **exits)
 
