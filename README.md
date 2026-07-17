@@ -1,5 +1,7 @@
 # Options Paper-Trading Bot
 
+[![CI](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml)
+
 Automatic options trading bot for an **Alpaca paper account**. It watches a
 30-name universe with a **two-tier scan**: every 30 minutes it ranks the whole
 universe for "likely to produce a tradeable signal soon" and keeps the top 5;
@@ -13,6 +15,57 @@ endpoint. Nothing here is financial advice; the strategy is a disciplined
 skeleton with **no proven edge** (see Backtesting below for the honest
 numbers), designed so the risk caps contain the damage while evidence
 accumulates.
+
+![Dashboard — live signal reasoning, risk gates, and bot controls](docs/dashboard.png)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph loop["Trading loop (main.py)"]
+        engine["engine.py<br/>clock → reconcile → exits → entries"]
+        scanner["scanner.py<br/>rank universe, keep top 5"]
+        strategy["strategy.py<br/>EMA trend + RSI cross"]
+        risk["risk.py<br/>entry gates · sizing · exit rules"]
+        options["options.py<br/>contract selection + liquidity gates"]
+        engine --> scanner
+        engine --> strategy
+        engine --> risk
+        engine --> options
+    end
+
+    broker["broker.py<br/>the ONLY Alpaca client"]
+    alpaca[("Alpaca paper API")]
+    engine --> broker --> alpaca
+
+    subgraph state["Shared state (files)"]
+        journal[("trades.csv")]
+        day[("state.json")]
+        active[("active.json")]
+        control[("control.json")]
+        tuned[("tuned_params.json")]
+    end
+    engine --> journal
+    engine --> day
+    engine --> active
+    control --> engine
+    tuned --> engine
+
+    subgraph dash["Dashboard"]
+        api["dashboard_api.py<br/>FastAPI"] --> web["web/<br/>Next.js UI"]
+    end
+    api --> active
+    api --> control
+    api -. "start / stop main.py" .-> engine
+
+    subgraph research["Research loop (offline — never imported by the bot)"]
+        search["search.py<br/>train-only grid search"]
+        gate["gate.py<br/>burn-once holdout verdict"]
+        proposer["proposer.py<br/>LLM strategy specs (JSON, never code)"]
+        proposer --> search --> gate
+    end
+    gate -. "evidence for manual review" .-> tuned
+```
 
 ## Strategy (defaults in `bot/config.py`, tunables in `tuned_params.json`)
 
