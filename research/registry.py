@@ -81,6 +81,26 @@ def trial_count(path: Path = DEFAULT_PATH) -> int:
     return len({e["key"] for e in entries(path) if e.get("kind") == "trial"})
 
 
+def trial_scores(path: Path = DEFAULT_PATH) -> dict[str, dict]:
+    """Map of trial key -> its logged scores dict, for every recorded trial.
+    Lets the searcher reuse a prior result instead of re-simulating a
+    candidate it has already scored on the same window. First write wins:
+    a candidate's score on a given window is deterministic, so an accidental
+    duplicate row cannot change the answer."""
+    out: dict[str, dict] = {}
+    for e in entries(path):
+        if e.get("kind") != "trial":
+            continue
+        out.setdefault(e["key"], e.get("scores", {}))
+    return out
+
+
+def trial_key(family: str, params: dict, window: str) -> str:
+    """Public accessor for the identity hash, so callers key into
+    trial_scores() with exactly the same hash log_trial() will write."""
+    return _key(family, params, window)
+
+
 def trial_sharpes(path: Path = DEFAULT_PATH) -> list[float]:
     """Sharpe of each unique trial — the spread feeds expected_max_sharpe."""
     seen: dict[str, float] = {}

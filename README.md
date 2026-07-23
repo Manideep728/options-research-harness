@@ -262,14 +262,18 @@ The gate stays human-invoked and burn-once regardless of who proposed.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-102 tests cover the indicator math (including a known Wilder RSI value),
-signal triggers, contract filters, every risk gate, journal P&L matching, the
-simulator (verified bar-for-bar identical to the live signal logic), the
-tuner guardrails (clamping, non-tunable risk caps, thin-evidence rejection),
-the scanner scoring/ranking, the earnings blackout, the active-shortlist
-persistence, the dashboard snapshot (shortlist-only polling), and full engine
-cycles against a fake broker (entries, exits, order reconciliation, stale-order
-cancels, max-hold via journal, two-tier ranking, cooldown, blackout).
+187 tests cover the indicator math (including a known Wilder RSI value),
+signal triggers, contract filters, every risk gate, journal P&L matching
+(incl. partial-fill FIFO), the simulator (verified bar-for-bar identical to
+the live signal logic), the tuner guardrails (clamping, non-tunable risk
+caps, thin-evidence rejection, train-then-validate selection), the scanner
+scoring/ranking, the earnings blackout, the active-shortlist persistence, the
+dashboard snapshot (shortlist-only polling), full engine cycles against a fake
+broker (entries, exits, order reconciliation, stale-order cancels, max-hold
+via journal, two-tier ranking, cooldown, blackout), the engine PID lock, the
+atomic file writer, and the research loop (holdout splits/embargo, deflated
+Sharpe, burn-once gate, select-on-train search, and registry-aware skip of
+already-scored candidates).
 
 ## Layout
 
