@@ -103,3 +103,72 @@ def test_search_without_cache_fails_cleanly(tmp_path):
                                    candidate_path=tmp_path / "c.json")
     assert not outcome.accepted
     assert "no cached bars" in outcome.reason
+
+
+# --- registry-aware skip: don't re-test what the registry already scored ---
+
+def _train_trial_keys(reg: Path) -> list[str]:
+    return [e["key"] for e in registry.entries(reg)
+            if e["kind"] == "trial" and e["window"] == "train"]
+
+
+def test_rerun_does_not_relog_train_trials(tmp_path, monkeypatch):
+    """Second search of the same family on the same window must reuse the
+    registry, not append duplicate train rows. A regression that dropped the
+    skip would double every train trial here."""
+    _write_cache(tmp_path)
+    monkeypatch.setattr(search, "MIN_TRADES", 1)
+    reg = tmp_path / "trials.jsonl"
+    cfg = _cfg(symbols=("AAA", "BBB"))
+
+    search.search_family("rsi_only", cfg, data_dir=tmp_path, registry_path=reg,
+                         candidate_path=tmp_path / "c1.json")
+    keys_after_first = _train_trial_keys(reg)
+
+    search.search_family("rsi_only", cfg, data_dir=tmp_path, registry_path=reg,
+                         candidate_path=tmp_path / "c2.json")
+    keys_after_second = _train_trial_keys(reg)
+
+    # No new train rows on the second run — every candidate was reused.
+    assert keys_after_second == keys_after_first
+
+
+def test_rerun_selects_the_same_winner_from_registry(tmp_path, monkeypatch):
+    """The reused-from-registry path must still pick the same winner and
+    produce the same evidence as the fresh run. A bug that skipped a
+    candidate without carrying its score forward could drop the true winner."""
+    _write_cache(tmp_path)
+    monkeypatch.setattr(search, "MIN_TRADES", 1)
+    reg = tmp_path / "trials.jsonl"
+    cfg = _cfg(symbols=("AAA", "BBB"))
+
+    first = search.search_family("rsi_only", cfg, data_dir=tmp_path,
+                                 registry_path=reg, candidate_path=tmp_path / "c1.json")
+    second = search.search_family("rsi_only", cfg, data_dir=tmp_path,
+                                  registry_path=reg, candidate_path=tmp_path / "c2.json")
+
+    assert second.signal_params == first.signal_params
+    assert second.exit_params == first.exit_params
+    assert second.accepted == first.accepted
+    # Re-simulated winner reproduces the same train stats bit-for-bit.
+    assert second.train.n == first.train.n
+    assert second.train.expectancy == first.train.expectancy
+
+
+def test_new_candidate_still_logged_when_registry_has_others(tmp_path, monkeypatch):
+    """Skip must be per-candidate, not all-or-nothing: a family sharing no
+    keys with a prior family's trials is fully simulated and logged."""
+    _write_cache(tmp_path)
+    monkeypatch.setattr(search, "MIN_TRADES", 1)
+    reg = tmp_path / "trials.jsonl"
+    cfg = _cfg(symbols=("AAA", "BBB"))
+
+    search.search_family("rsi_only", cfg, data_dir=tmp_path, registry_path=reg,
+                         candidate_path=tmp_path / "c1.json")
+    before = len(_train_trial_keys(reg))
+
+    # donchian shares no candidate keys with rsi_only -> all newly logged.
+    search.search_family("donchian", cfg, data_dir=tmp_path, registry_path=reg,
+                         candidate_path=tmp_path / "c2.json")
+    after = len(_train_trial_keys(reg))
+    assert after > before

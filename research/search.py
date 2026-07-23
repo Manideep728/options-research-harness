@@ -122,26 +122,52 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
         return SearchOutcome(False, "no cached bars — run `python -m research fetch`",
                              family_name, {}, {}, None, None, None)
     train_w, val_w = split_all(bars)
-    log.info("searching %s: %d candidates", family_name, len(candidates))
 
-    best_train: SimResult | None = None
+    # Registry-aware skip: a candidate already scored on this train window is
+    # not re-simulated (wasted work) nor re-logged (a duplicate row would not
+    # change trial_count — same key — but bloats the file). We still need its
+    # score to pick the winner, so we read it back from the registry. Its
+    # score on a fixed window is deterministic, so reusing it is exact.
+    prior_scores = registry.trial_scores(registry_path)
+
+    best_expectancy: float | None = None
     best_sig: dict = {}
     best_exit: dict = {}
+    reused = 0
     for sig_params, exit_params in candidates:
-        train_res = run_family(train_w, replace(cfg, **exit_params), sp,
-                               family, sig_params)
-        registry.log_trial(
-            registry_path, family_name, {**sig_params, **exit_params},
-            "train", metrics.summarize([t.pnl_pct for t in train_res.trades]),
-        )
-        if train_res.n < MIN_TRADES:
-            continue
-        if best_train is None or train_res.expectancy > best_train.expectancy:
-            best_train, best_sig, best_exit = train_res, sig_params, exit_params
+        params = {**sig_params, **exit_params}
+        key = registry.trial_key(family_name, params, "train")
+        cached = prior_scores.get(key)
+        if cached is not None:
+            reused += 1
+            n = int(cached.get("trades", 0))
+            expectancy = float(cached.get("expectancy", 0.0))
+        else:
+            train_res = run_family(train_w, replace(cfg, **exit_params), sp,
+                                   family, sig_params)
+            registry.log_trial(
+                registry_path, family_name, params,
+                "train", metrics.summarize([t.pnl_pct for t in train_res.trades]),
+            )
+            n, expectancy = train_res.n, train_res.expectancy
 
-    if best_train is None:
+        if n < MIN_TRADES:
+            continue
+        if best_expectancy is None or expectancy > best_expectancy:
+            best_expectancy = expectancy
+            best_sig, best_exit = sig_params, exit_params
+
+    log.info("searched %s: %d candidates (%d reused from registry, %d simulated)",
+             family_name, len(candidates), reused, len(candidates) - reused)
+
+    if best_expectancy is None:
         return SearchOutcome(False, "no candidate produced enough training trades",
                              family_name, {}, {}, None, None, None)
+
+    # The evidence write needs the winner's full SimResult, and the registry
+    # only stores summary scores (no trades). Re-simulate the single winner
+    # once — one run, not the whole grid — whether or not it was reused above.
+    best_train = run_family(train_w, replace(cfg, **best_exit), sp, family, best_sig)
 
     # One validation run for the single winner; baseline = the live strategy
     # (current cfg, default signal) on the same validation bars.

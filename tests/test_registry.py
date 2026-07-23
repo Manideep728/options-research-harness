@@ -44,3 +44,30 @@ def test_missing_file_is_empty_not_error(tmp_path: Path):
     path = tmp_path / "nope.jsonl"
     assert registry.entries(path) == []
     assert registry.trial_count(path) == 0
+
+
+def test_trial_scores_keyed_by_trial_key(tmp_path: Path):
+    path = tmp_path / "trials.jsonl"
+    s1 = {"trades": 40, "expectancy": 0.05, "sharpe": 0.2}
+    registry.log_trial(path, "baseline", {"a": 1}, "train", s1)
+    key = registry.trial_key("baseline", {"a": 1}, "train")
+    assert registry.trial_scores(path)[key] == s1
+
+
+def test_trial_scores_first_write_wins_on_duplicate(tmp_path: Path):
+    """A candidate's score on a fixed window is deterministic, so a duplicate
+    row must not change the cached score the searcher reuses."""
+    path = tmp_path / "trials.jsonl"
+    key = registry.trial_key("f", {"a": 1}, "train")
+    registry.log_trial(path, "f", {"a": 1}, "train", {"expectancy": 0.10})
+    registry.log_trial(path, "f", {"a": 1}, "train", {"expectancy": 0.99})  # dup
+    assert registry.trial_scores(path)[key]["expectancy"] == 0.10
+
+
+def test_trial_key_matches_logged_key(tmp_path: Path):
+    """trial_key must reproduce exactly the key log_trial writes, or the
+    searcher's skip-lookup would silently miss every prior trial."""
+    path = tmp_path / "trials.jsonl"
+    registry.log_trial(path, "fam", {"x": 3, "y": 4}, "train", {"sharpe": 0.1})
+    logged_key = [e["key"] for e in registry.entries(path)][0]
+    assert registry.trial_key("fam", {"x": 3, "y": 4}, "train") == logged_key
