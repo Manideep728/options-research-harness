@@ -1,0 +1,14 @@
+{
+  "name": "calm-uptrend-calls",
+  "hypothesis": "Report: uptrend entries averaged +35.1% vs +4.0% in downtrends, and low-vol entries +52.5% vs -2.2% in high vol. Trade only calls, only in EMA uptrends, only when entry volatility is calm.",
+  "trend": "ema_cross",
+  "trigger": "rsi_cross",
+  "filters": ["calls_only", "max_entry_vol"],
+  "grid": {
+    "ema_fast": [8, 9],
+    "ema_slow": [18, 21],
+    "rsi_bull_level": [40.0, 45.0],
+    "rsi_bear_level": [55.0],
+    "max_entry_vol": [0.002, 0.003]
+  }
+}
