@@ -14,9 +14,13 @@ engine.pid
 web/.next/
 web/node_modules/
 .claude/scheduled_tasks.lock
+# Research data cache: large, re-fetchable from Alpaca; never committed.
 research/data/
-research/trials.jsonl
+# Transient per-run handoff/report artifacts (regenerated every run).
 research/candidate.json
 research/report.txt
-research/proposals/
 research/proposal_prompt.txt
+# NOTE: research/trials.jsonl (the trial registry) and research/proposals/*.json
+# (strategy specs) are deliberately COMMITTED, not ignored. The registry is the
+# denominator of every deflated-Sharpe claim and the burn-once gate memory — it
+# must persist across clones, or N resets to 0 and the honesty machinery breaks.

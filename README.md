@@ -221,11 +221,29 @@ never imports it). The cycle:
 
 Families: `baseline` (live EMA+RSI), `ema_slope`, `donchian`, `rsi_only`
 (control). Honesty machinery: every candidate ever scored is logged to an
-append-only `research/trials.jsonl`; the acceptance score is a **deflated
-Sharpe** (your Sharpe vs. the best of N logged tries); the holdout window is
-**burned** after one gate attempt — pass or fail — and a repeat is refused
-until new data accrues. A gate pass prints evidence for *manual* review;
-nothing auto-deploys, and risk caps are not in any search space.
+append-only `research/trials.jsonl` — **committed to git**, because that trial
+count is the denominator of every honest claim the loop makes (a local-only
+registry would reset N to 0 on a fresh clone and make every result look better
+than it is, and the burn-once gate would stop being enforceable across
+machines). The acceptance score is a **deflated Sharpe** (your Sharpe vs. the
+best of N logged tries); the holdout window is **burned** after one gate
+attempt — pass or fail — and a repeat is refused until new data accrues. A
+gate pass prints evidence for *manual* review; nothing auto-deploys, and risk
+caps are not in any search space. The `search` step also **skips candidates
+already recorded on the same data window**, so re-running a family neither
+repeats work nor inflates N with duplicates.
+
+The data cache under `research/data/` is *not* committed (large, and
+re-fetchable from Alpaca); a fresh clone runs `fetch` once before searching.
+
+**A worked example** (30-name universe, 365d of 15-min bars): searching
+`baseline`, `ema_slope`, and `donchian` produced **759 logged trials and zero
+accepted winners** — the selective RSI configs that survived the train filter
+fired too few times to clear the ≥30-trade validation floor (`baseline` +33.8%
+but only 20 trades; `ema_slope` +36.0% on 17), and raw `donchian` breakout was
+outright negative after costs (−1.2% over 3,143 trades). That "nothing cleared
+the bar" is a real result, and the registry preserves it so those exact
+configs aren't re-tested.
 
 **Phase 2 — the LLM proposer.** `python -m research propose` sends the
 failure report + trial history to Claude, which proposes the next family as
