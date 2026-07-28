@@ -11,6 +11,7 @@ main.py`, a human) can check "is the process that owns this PID file still
 alive?" without needing to have started it."""
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -49,7 +50,11 @@ def is_running(path: str) -> bool:
 
 
 def _pid_alive(pid: int) -> bool:
-    if os.name == "nt":
+    # sys.platform, not os.name: both identify Windows, but a type checker
+    # only narrows platform-specific branches on sys.platform. With os.name
+    # it type-checks the Windows arm on Linux too and fails on ctypes.windll,
+    # which does not exist there.
+    if sys.platform == "win32":
         import ctypes
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000

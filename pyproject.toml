@@ -47,3 +47,12 @@ check_untyped_defs = true
 # alpaca-py ships no py.typed marker; its symbols are Any to mypy.
 module = ["alpaca.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# bot.lock dispatches on sys.platform to call Windows- or POSIX-only APIs.
+# mypy evaluates that branch for one platform at a time, so whichever arm is
+# inactive is correctly "unreachable" — on Windows the POSIX arm, on Linux
+# (where CI runs) the ctypes.windll arm. Both arms are real, so the warning is
+# noise here even though it is worth keeping everywhere else.
+module = ["bot.lock"]
+warn_unreachable = false
