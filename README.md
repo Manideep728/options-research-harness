@@ -1,22 +1,58 @@
-# Options Paper-Trading Bot
+# A Research Harness That Makes It Hard to Fool Yourself
 
 [![CI](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml)
 
-Automatic options trading bot for an **Alpaca paper account**. It watches a
-30-name universe with a **two-tier scan**: every 30 minutes it ranks the whole
-universe for "likely to produce a tradeable signal soon" and keeps the top 5;
-every 30 seconds it polls just those 5, computes EMA/RSI, and — when the strict
-rules line up — buys a single call or put with a marketable limit order, then
-manages the exit. Long options only: maximum possible loss on any trade is the
-premium paid.
+Backtesting lies. Search 700 strategy variants and the best one always looks
+profitable — not because it works, but because you searched 700 times. This
+repo is an attempt to build the machinery that stops that from happening, with
+a live options bot on an **Alpaca paper account** as the thing being tested.
+
+Where it currently stands, stated exactly:
+
+> **986 candidate configurations have been searched and logged.** The three
+> hand-written strategy families produced **zero** that cleared the bar. The
+> first candidate to survive came from the LLM proposer — it reads the failure
+> report, and hypothesized "trade calls only, only in uptrends, only when
+> volatility is calm." That one cleared the search stage at +35.4% validation
+> expectancy over 32 trades, against the live strategy's +5.2%.
+>
+> **It has not passed anything yet.** It is queued for the burn-once holdout
+> gate, which has never been run. Nothing is deployed. A +35% number selected
+> out of 986 tries is exactly the kind of result this repo exists to distrust —
+> which is why the gate scores it as a *deflated* Sharpe against N=986, and
+> why the holdout is consumed on the single attempt.
+
+Every one of those 986 trials is committed to this repo, because that count is
+the denominator of every claim the pipeline makes about itself.
+
+**What enforces the honesty** (details in [Research loop](#research-loop-research)):
+
+| Guard | The failure it prevents |
+|---|---|
+| **Committed trial registry** | A local-only log resets `N` to 0 on a fresh clone, and every result silently looks better than it is. |
+| **Deflated Sharpe ratio** | Scores a result against *the best of N tries*, so a lucky winner out of 759 stops reading as skill. |
+| **Burn-once holdout** | The out-of-sample window is consumed after a single gate attempt — pass or fail — so it can't be retried until it flatters. |
+| **Select on train, touch validation once** | Ranking candidates by validation score and then reporting that score is selection bias. |
+| **Quarantined + embargoed holdout** | Cut at the same calendar moment across both datasets, so no daily-bar check can peek at the gate's window. |
+| **LLM proposes specs, never code** | The proposer picks from a fixed block vocabulary with clamped params and a capped grid — it cannot smuggle in arbitrary logic. |
+| **No auto-deploy, ever** | A gate pass prints evidence for human review. Risk caps are in no search space. |
 
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
-endpoint. Nothing here is financial advice; the strategy is a disciplined
-skeleton with **no proven edge** (see Backtesting below for the honest
-numbers), designed so the risk caps contain the damage while evidence
+endpoint. Nothing here is financial advice, and the live strategy has **no
+demonstrated edge** — the risk caps exist to contain the damage while evidence
 accumulates.
 
 ![Dashboard — live signal reasoning, risk gates, and bot controls](docs/dashboard.png)
+
+## The execution target: an options bot
+
+The thing the harness evaluates is a real, running bot. It watches a 30-name
+universe with a **two-tier scan**: every 30 minutes it ranks the whole universe
+for "likely to produce a tradeable signal soon" and keeps the top 5; every 30
+seconds it polls just those 5, computes EMA/RSI, and — when the strict rules
+line up — buys a single call or put with a marketable limit order, then manages
+the exit. Long options only: maximum possible loss on any trade is the premium
+paid.
 
 ## Architecture
 
@@ -116,9 +152,12 @@ and a **daily circuit breaker** that halts new entries if the account is down
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\pip install -r requirements-dev.txt   # runtime + test/lint tooling
 copy .env.example .env   # then edit .env
 ```
+
+(`requirements.txt` alone is enough to *run* the bot; `requirements-dev.txt`
+adds pytest, ruff, and mypy. Both are pinned so a clone reproduces CI.)
 
 Get free **paper** API keys: sign up at https://alpaca.markets, open the
 dashboard, switch to **Paper Trading**, and generate an API key pair. Put both
@@ -236,14 +275,29 @@ repeats work nor inflates N with duplicates.
 The data cache under `research/data/` is *not* committed (large, and
 re-fetchable from Alpaca); a fresh clone runs `fetch` once before searching.
 
-**A worked example** (30-name universe, 365d of 15-min bars): searching
-`baseline`, `ema_slope`, and `donchian` produced **759 logged trials and zero
-accepted winners** — the selective RSI configs that survived the train filter
-fired too few times to clear the ≥30-trade validation floor (`baseline` +33.8%
-but only 20 trades; `ema_slope` +36.0% on 17), and raw `donchian` breakout was
-outright negative after costs (−1.2% over 3,143 trades). That "nothing cleared
-the bar" is a real result, and the registry preserves it so those exact
-configs aren't re-tested.
+**A worked example** (30-name universe, 365d of 15-min bars). Searching the
+hand-written families produced **759 logged trials and zero accepted winners**:
+the selective RSI configs that survived the train filter fired too few times to
+clear the ≥30-trade validation floor (`baseline` +33.8% but only 20 trades;
+`ema_slope` +36.0% on 17), while the two families that traded often enough were
+negative after costs (`donchian` −1.2% over 3,143 trades; `rsi_only`, the
+deliberate control, −2.2% over 2,230). Note the shape of that failure — the
+configs that *looked* best were the ones with almost no evidence behind them.
+That is precisely what the trade floor exists to catch, and the registry
+preserves those results so the same configs are never re-tested.
+
+Phase 2 changed the outcome. Given the failure report, the LLM proposer
+observed that uptrend entries averaged +35.1% against +4.0% in downtrends, and
+calm-volatility entries +52.5% against −2.2% in high volatility — then composed
+those two observations into `calm-uptrend-calls` (`calls_only` +
+`max_entry_vol`, spec in `research/proposals/`). Its winner is the first
+candidate to clear the search stage: **32 validation trades at +35.4%
+expectancy**, versus +5.2% for the live strategy on the same window. The
+registry now holds 986 unique trials.
+
+That candidate's status is *pending*, not *proven*. It still has to survive the
+burn-once holdout gate, where its Sharpe is deflated against N=986 — and one
+attempt is all it gets.
 
 **Phase 2 — the LLM proposer.** `python -m research propose` sends the
 failure report + trial history to Claude, which proposes the next family as
@@ -256,13 +310,18 @@ through the identical pipeline with full registry logging. Requires
 exact prompt to `research/proposal_prompt.txt` for any LLM (or you) to answer.
 The gate stays human-invoked and burn-once regardless of who proposed.
 
-## Tests
+## Tests & quality gates
 
 ```powershell
-.venv\Scripts\python -m pytest tests -q
+.venv\Scripts\python -m pytest tests -q   # 205 tests
+.venv\Scripts\python -m ruff check .      # lint
+.venv\Scripts\python -m mypy              # type check
+cd web; npm run lint; npm run build       # frontend
 ```
 
-187 tests cover the indicator math (including a known Wilder RSI value),
+CI runs all five on every push and pull request.
+
+205 tests cover the indicator math (including a known Wilder RSI value),
 signal triggers, contract filters, every risk gate, journal P&L matching
 (incl. partial-fill FIFO), the simulator (verified bar-for-bar identical to
 the live signal logic), the tuner guardrails (clamping, non-tunable risk
@@ -271,9 +330,10 @@ scoring/ranking, the earnings blackout, the active-shortlist persistence, the
 dashboard snapshot (shortlist-only polling), full engine cycles against a fake
 broker (entries, exits, order reconciliation, stale-order cancels, max-hold
 via journal, two-tier ranking, cooldown, blackout), the engine PID lock, the
-atomic file writer, and the research loop (holdout splits/embargo, deflated
+atomic file writer, the research loop (holdout splits/embargo, deflated
 Sharpe, burn-once gate, select-on-train search, and registry-aware skip of
-already-scored candidates).
+already-scored candidates), and the dashboard API — whose CSRF guard and
+single-engine PID check are each verified to fail the suite when removed.
 
 ## Layout
 
@@ -298,6 +358,22 @@ bot/broker.py      the ONLY module that talks to Alpaca; DRY_RUN lives here
 bot/engine.py      the loop: clock -> reconcile -> exits -> re-rank (due) -> poll shortlist -> sleep
 dashboard_api.py   FastAPI backend for the web dashboard; also starts/stops main.py on request
 run_dashboard.py   launches API + web frontend together (Python-side alternative to npm run dev)
-web/               Next.js dashboard frontend
-web/scripts/dev-with-api.js   npm run dev entrypoint: boots the API, then next dev
+
+research/data.py       bar cache + train/val/holdout splits with calendar embargo
+research/families.py   built-in strategy families (baseline, ema_slope, donchian, rsi_only)
+research/blocks.py     the fixed block vocabulary an LLM proposal may combine
+research/search.py     select-on-train grid search, registry-aware
+research/registry.py   append-only trial log (committed: it is the honest denominator)
+research/metrics.py    deflated Sharpe
+research/gate.py       burn-once out-of-sample verdict
+research/proposer.py   Claude proposes a spec (JSON, never code)
+
+web/src/app/page.tsx              composition only
+web/src/hooks/use-dashboard.ts    polling, actions, and all dashboard state
+web/src/components/dashboard/     one file per panel + shared primitives
+web/scripts/dev-with-api.js       npm run dev entrypoint: boots the API, then next dev
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
