@@ -13,6 +13,8 @@ engine.pid
 .pytest_cache/
 web/.next/
 web/node_modules/
+# Personal learning notes, not project documentation — kept local.
+QUESTIONS.md
 .claude/scheduled_tasks.lock
 # Research data cache: large, re-fetchable from Alpaca; never committed.
 research/data/
