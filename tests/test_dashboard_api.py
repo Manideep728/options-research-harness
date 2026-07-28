@@ -8,14 +8,19 @@ Nothing here may spawn a real process or reach the network: the engine
 lifecycle is faked through the lock file, and the broker through a stub.
 """
 
+import os
 import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_api
 from bot.control import load_control
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 CSRF_HEADER = {"x-dashboard-client": "test"}
 
@@ -76,8 +81,9 @@ def api(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(dashboard_api, "cfg", cfg)
 
+    # Seed the lazy broker cache so get_broker() never builds a real client.
     broker = FakeBroker()
-    monkeypatch.setattr(dashboard_api, "broker", broker)
+    monkeypatch.setattr(dashboard_api, "_broker", broker)
 
     spawned: list[list[str]] = []
 
@@ -101,6 +107,32 @@ def api(tmp_path, monkeypatch):
         client.running = running
         client.cfg = cfg
         yield client
+
+
+# --- import purity ------------------------------------------------------
+
+def test_module_imports_without_credentials():
+    """Importing must not require credentials.
+
+    Building the Alpaca client at module scope made this module unimportable
+    without a configured .env — alpaca-py raises on an empty key pair. That is
+    why it went untested for so long, and why CI (which has no .env) could not
+    even collect this file. Runs in a subprocess with the keys blanked, since
+    the parent process has already imported the module.
+    """
+    env = dict(os.environ)
+    env["ALPACA_API_KEY"] = ""
+    env["ALPACA_SECRET_KEY"] = ""
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import dashboard_api"],
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 # --- CSRF guard ---------------------------------------------------------
