@@ -19,7 +19,24 @@ from bot.control import save_control
 from bot.dashboard import build_dashboard_snapshot
 
 cfg = Settings.load()
-broker = AlpacaBroker(cfg)
+
+_broker: AlpacaBroker | None = None
+
+
+def get_broker() -> AlpacaBroker:
+    """Build the Alpaca client on first use rather than at import.
+
+    Constructing it at module scope meant *importing* this module required
+    live credentials — alpaca-py raises on an empty key pair. That is why
+    this module had no tests: it could not be imported without a configured
+    .env. Deferring construction keeps the import pure, so any environment
+    without credentials (CI, a fresh clone) can import and test the routes.
+    """
+    global _broker
+    if _broker is None:
+        _broker = AlpacaBroker(cfg)
+    return _broker
+
 
 ROOT = Path(__file__).resolve().parent
 MAIN_SCRIPT = ROOT / "main.py"
@@ -107,7 +124,7 @@ def health() -> dict:
 
 @app.get("/dashboard")
 def dashboard() -> dict:
-    snapshot = build_dashboard_snapshot(broker, cfg)
+    snapshot = build_dashboard_snapshot(get_broker(), cfg)
     data = snapshot.__dict__
     data["bot"]["engine_running"] = _engine_running()
     return data
@@ -148,7 +165,7 @@ def resume() -> dict:
 @app.post("/orders/{order_id}/cancel")
 def cancel_order(order_id: str) -> dict:
     try:
-        broker.cancel_order(order_id)
+        get_broker().cancel_order(order_id)
     except Exception as exc:  # pragma: no cover - surfaces broker errors verbatim
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True, "order_id": order_id}
@@ -156,12 +173,12 @@ def cancel_order(order_id: str) -> dict:
 
 @app.post("/positions/{symbol}/close")
 def close_position(symbol: str) -> dict:
-    positions = broker.get_option_positions()
+    positions = get_broker().get_option_positions()
     match = next((p for p in positions if p.symbol == symbol), None)
     if match is None:
         raise HTTPException(status_code=404, detail="position not found")
     try:
-        broker.close_option(match.symbol, match.qty, match.current_price)
+        get_broker().close_option(match.symbol, match.qty, match.current_price)
     except Exception as exc:  # pragma: no cover - surfaces broker errors verbatim
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True, "symbol": symbol}
