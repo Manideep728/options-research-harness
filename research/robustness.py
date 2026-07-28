@@ -14,13 +14,13 @@
 """
 
 import itertools
-from dataclasses import dataclass, replace as dc_replace
+from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from datetime import datetime
 from pathlib import Path
 
 from bot.config import Settings
 from bot.simulator import SimParams
-
 from research import data
 from research.families import Family
 from research.search import run_family
@@ -107,7 +107,7 @@ def daily_regime_check(cfg: Settings, family: Family, signal_params: dict,
 def _group_by_year(closes: list[float],
                    times: list[datetime]) -> dict[int, tuple[list[float], list[datetime]]]:
     out: dict[int, tuple[list[float], list[datetime]]] = {}
-    for c, t in zip(closes, times):
+    for c, t in zip(closes, times, strict=True):
         fold = out.setdefault(t.year, ([], []))
         fold[0].append(c)
         fold[1].append(t)

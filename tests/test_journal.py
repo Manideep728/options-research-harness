@@ -1,9 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot import journal
 from bot.broker import Fill
 
-T0 = datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 7, 6, 15, 0, tzinfo=UTC)
 
 
 def fill(order_id, side, price, ts=T0, symbol="SPY260716C00120000", qty=1):

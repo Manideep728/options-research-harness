@@ -53,11 +53,15 @@ def pick_contract(
             continue
         dte = (c.expiry - today).days
         if not (cfg.min_dte <= dte <= cfg.max_dte):
-            rejections.append(Rejection(c.symbol, f"DTE {dte} outside [{cfg.min_dte},{cfg.max_dte}]"))
+            rejections.append(
+                Rejection(c.symbol, f"DTE {dte} outside [{cfg.min_dte},{cfg.max_dte}]")
+            )
             continue
         is_otm = c.strike > underlying_price if want == "call" else c.strike < underlying_price
         if not is_otm:
-            rejections.append(Rejection(c.symbol, f"not OTM (strike {c.strike} vs px {underlying_price:.2f})"))
+            rejections.append(
+                Rejection(c.symbol, f"not OTM (strike {c.strike} vs px {underlying_price:.2f})")
+            )
             continue
         if c.bid <= 0:
             rejections.append(Rejection(c.symbol, "no bid"))
@@ -66,7 +70,11 @@ def pick_contract(
             rejections.append(Rejection(c.symbol, f"spread too wide (bid {c.bid} ask {c.ask})"))
             continue
         if c.open_interest < cfg.min_open_interest:
-            rejections.append(Rejection(c.symbol, f"open interest {c.open_interest} < {cfg.min_open_interest}"))
+            rejections.append(
+                Rejection(
+                    c.symbol, f"open interest {c.open_interest} < {cfg.min_open_interest}"
+                )
+            )
             continue
         candidates.append(c)
 

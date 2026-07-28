@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bot.atomic import atomic_write_text
@@ -29,6 +29,6 @@ def load_control(path: str) -> ControlState:
 
 
 def save_control(path: str, paused: bool) -> ControlState:
-    state = ControlState(paused=paused, updated_at=datetime.now(timezone.utc).isoformat())
+    state = ControlState(paused=paused, updated_at=datetime.now(UTC).isoformat())
     atomic_write_text(path, json.dumps(asdict(state), indent=2))
     return state

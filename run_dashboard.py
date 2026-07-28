@@ -12,12 +12,11 @@ import sys
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 
 
-def _spawn(args: list[str], cwd: Path) -> subprocess.Popen[str]:
+def _spawn(args: list[str], cwd: Path) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         args,
         cwd=str(cwd),

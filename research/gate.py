@@ -20,7 +20,6 @@ from pathlib import Path
 from bot.config import Settings
 from bot.simulator import SimParams, SimResult
 from bot.tuner import MIN_TRADES
-
 from research import data, metrics, registry
 from research.search import resolve_family, run_family
 

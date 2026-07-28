@@ -69,5 +69,5 @@ def test_trial_key_matches_logged_key(tmp_path: Path):
     searcher's skip-lookup would silently miss every prior trial."""
     path = tmp_path / "trials.jsonl"
     registry.log_trial(path, "fam", {"x": 3, "y": 4}, "train", {"sharpe": 0.1})
-    logged_key = [e["key"] for e in registry.entries(path)][0]
+    logged_key = next(e["key"] for e in registry.entries(path))
     assert registry.trial_key("fam", {"x": 3, "y": 4}, "train") == logged_key

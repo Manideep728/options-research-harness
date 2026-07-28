@@ -8,12 +8,14 @@ submitting them.
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
+from typing import cast
 from zoneinfo import ZoneInfo
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.models import BarSet
 from alpaca.data.requests import (
     OptionLatestQuoteRequest,
     StockBarsRequest,
@@ -27,6 +29,15 @@ from alpaca.trading.enums import (
     OrderSide,
     QueryOrderStatus,
     TimeInForce,
+)
+from alpaca.trading.models import (
+    Calendar,
+    Clock,
+    OptionContract,
+    OptionContractsResponse,
+    Order,
+    Position,
+    TradeAccount,
 )
 from alpaca.trading.requests import (
     GetCalendarRequest,
@@ -43,6 +54,12 @@ log = logging.getLogger("bot.broker")
 
 # OCC option symbol: ROOT + YYMMDD + C/P + strike*1000 zero-padded to 8 digits
 _OCC_TAIL = 15
+
+# Every alpaca-py client method is typed `Union[Model, Dict[str, Any]]` because
+# the SDK can return raw JSON when constructed with raw_data=True. This client
+# never is, so the dict arm is unreachable. Narrowing it once per call with
+# cast() — rather than sprinkling `# type: ignore` — keeps the rest of this
+# module (and everything downstream of it) genuinely type-checked.
 
 
 @dataclass(frozen=True)
@@ -103,7 +120,7 @@ class AlpacaBroker:
     # --- account / clock ---
 
     def get_clock(self) -> ClockInfo:
-        c = self.trading.get_clock()
+        c = cast(Clock, self.trading.get_clock())
         return ClockInfo(
             is_open=c.is_open,
             now=c.timestamp,
@@ -116,26 +133,32 @@ class AlpacaBroker:
 
         Alpaca's calendar returns NAIVE datetimes in US/Eastern wall time,
         so the zone must be attached explicitly before converting."""
-        cal = self.trading.get_calendar(GetCalendarRequest(start=day, end=day))
+        cal = cast(
+            list[Calendar],
+            self.trading.get_calendar(GetCalendarRequest(start=day, end=day)),
+        )
         if not cal:
             return None
         eastern = cal[0].open.replace(tzinfo=ZoneInfo("America/New_York"))
-        return eastern.astimezone(timezone.utc)
+        return eastern.astimezone(UTC)
 
     def get_equity(self) -> float:
-        return float(self.trading.get_account().equity)
+        account = cast(TradeAccount, self.trading.get_account())
+        return float(account.equity or 0.0)
 
     def get_last_equity(self) -> float:
         """Equity at yesterday's close — the honest circuit-breaker anchor."""
-        return float(self.trading.get_account().last_equity or 0.0)
+        account = cast(TradeAccount, self.trading.get_account())
+        return float(account.last_equity or 0.0)
 
     # --- positions ---
 
     def get_option_positions(self) -> list[OpenPosition]:
         """Open option positions, priced at the BID (the sellable price),
         falling back to Alpaca's mark when there is no live bid."""
+        positions = cast(list[Position], self.trading.get_all_positions())
         raw = [
-            p for p in self.trading.get_all_positions()
+            p for p in positions
             if getattr(p.asset_class, "value", str(p.asset_class)) == "us_option"
         ]
         if not raw:
@@ -150,7 +173,7 @@ class AlpacaBroker:
         except Exception:
             log.warning("quote fetch for positions failed; using marks", exc_info=True)
 
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         out: list[OpenPosition] = []
         for p in raw:
             mark = float(p.current_price or 0.0)
@@ -172,9 +195,15 @@ class AlpacaBroker:
     def get_todays_option_orders(self, day_start: datetime) -> tuple[list[OpenOrder], list[Fill]]:
         """(still-open option orders, option fills) since day_start."""
         open_orders: list[OpenOrder] = []
-        for o in self.trading.get_orders(
+        for o in cast(list[Order], self.trading.get_orders(
             GetOrdersRequest(status=QueryOrderStatus.OPEN, after=day_start)
-        ):
+        )):
+            # symbol/side/submitted_at are Optional on the SDK model. An order
+            # missing any of them cannot be reconciled against a position, so
+            # skip it loudly rather than crash the whole cycle on an attribute.
+            if not o.symbol or not o.side or o.submitted_at is None:
+                log.warning("skipping malformed order %s (symbol/side/timestamp missing)", o.id)
+                continue
             if not is_occ_symbol(o.symbol):
                 continue
             open_orders.append(
@@ -188,9 +217,12 @@ class AlpacaBroker:
             )
 
         fills: list[Fill] = []
-        for o in self.trading.get_orders(
+        for o in cast(list[Order], self.trading.get_orders(
             GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=day_start)
-        ):
+        )):
+            if not o.symbol or not o.side:
+                log.warning("skipping malformed fill %s (symbol/side missing)", o.id)
+                continue
             if not is_occ_symbol(o.symbol) or not o.filled_at or float(o.filled_qty or 0) == 0:
                 continue
             fills.append(
@@ -200,7 +232,7 @@ class AlpacaBroker:
                     symbol=o.symbol,
                     underlying=occ_underlying(o.symbol),
                     side=o.side.value,
-                    qty=int(float(o.filled_qty)),
+                    qty=int(float(o.filled_qty or 0)),
                     price=float(o.filled_avg_price or 0.0),
                 )
             )
@@ -222,7 +254,7 @@ class AlpacaBroker:
             log.info("DRY_RUN: would BUY %d x %s limit %.2f (ask %.2f)",
                      qty, contract.symbol, limit, contract.ask)
             return "dry-run"
-        order = self.trading.submit_order(
+        order = cast(Order, self.trading.submit_order(
             LimitOrderRequest(
                 symbol=contract.symbol,
                 qty=qty,
@@ -231,7 +263,7 @@ class AlpacaBroker:
                 limit_price=limit,
                 client_order_id=self._client_order_id("buy", contract.symbol),
             )
-        )
+        ))
         log.info("submitted BUY %d x %s limit %.2f (order %s)",
                  qty, contract.symbol, limit, order.id)
         return str(order.id)
@@ -246,7 +278,7 @@ class AlpacaBroker:
             log.warning("%s: no bid — closing at market", occ_symbol)
             self.trading.close_position(occ_symbol)
             return
-        order = self.trading.submit_order(
+        order = cast(Order, self.trading.submit_order(
             LimitOrderRequest(
                 symbol=occ_symbol,
                 qty=qty,
@@ -255,7 +287,7 @@ class AlpacaBroker:
                 limit_price=round_tick(bid),
                 client_order_id=self._client_order_id("sell", occ_symbol),
             )
-        )
+        ))
         log.info("submitted SELL %d x %s limit %.2f (order %s)",
                  qty, occ_symbol, round_tick(bid), order.id)
 
@@ -266,7 +298,7 @@ class AlpacaBroker:
         whose order actually went through) is rejected by Alpaca's
         client_order_id uniqueness constraint instead of silently opening a
         second position."""
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         return f"{side}-{occ_symbol}-{today}"[:128]
 
     # --- market data ---
@@ -274,17 +306,17 @@ class AlpacaBroker:
     def get_closes(self, symbol: str) -> list[float]:
         """Last `bar_history_count` CLOSED bars (drops the in-progress bar)."""
         tf_min = self.cfg.bar_timeframe_minutes
-        start = datetime.now(timezone.utc) - timedelta(days=10)
-        bars = self.stock_data.get_stock_bars(
+        start = datetime.now(UTC) - timedelta(days=10)
+        bars = cast(BarSet, self.stock_data.get_stock_bars(
             StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=TimeFrame(tf_min, TimeFrameUnit.Minute),
                 start=start,
                 feed=DataFeed.IEX,
             )
-        )
+        ))
         series = bars.data.get(symbol, [])
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         closed = [
             b for b in series
             if b.timestamp + timedelta(minutes=tf_min) <= now
@@ -311,12 +343,12 @@ class AlpacaBroker:
             strike_price_lte=str(round(px * 1.05, 2)),
             limit=500,
         )
-        contracts = []
-        page = self.trading.get_option_contracts(req)
+        contracts: list[OptionContract] = []
+        page = cast(OptionContractsResponse, self.trading.get_option_contracts(req))
         contracts.extend(page.option_contracts or [])
         while page.next_page_token:
             req.page_token = page.next_page_token
-            page = self.trading.get_option_contracts(req)
+            page = cast(OptionContractsResponse, self.trading.get_option_contracts(req))
             contracts.extend(page.option_contracts or [])
 
         symbols = [c.symbol for c in contracts if c.tradable]

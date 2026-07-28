@@ -1,0 +1,49 @@
+[project]
+name = "trading-bot"
+version = "0.1.0"
+description = "Guarded strategy-research harness with an Alpaca paper-trading options bot as its execution target"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = [".venv", "web", "research/data"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort (import order)
+    "UP",   # pyupgrade (modern syntax for the target version)
+    "B",    # flake8-bugbear (likely bugs: mutable defaults, loop-var capture)
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 guards against *mutable* defaults evaluated once at import. SimParams is
+# a frozen dataclass, so `sp: SimParams = SimParams()` shares one immutable
+# instance — which is the intent, not a bug.
+extend-immutable-calls = ["bot.simulator.SimParams"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["bot", "research", "main.py", "backtest.py", "dashboard_api.py", "run_dashboard.py"]
+# Pragmatic bar: catch real type errors without demanding annotations on every
+# local. The broker is deliberately duck-typed (that is what makes the engine
+# testable against a fake), so `disallow_untyped_defs` is off by design.
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# alpaca-py ships no py.typed marker; its symbols are Any to mypy.
+module = ["alpaca.*"]
+ignore_missing_imports = true

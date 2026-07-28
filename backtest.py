@@ -10,10 +10,12 @@
 import argparse
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.models import BarSet
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -27,17 +29,17 @@ log = logging.getLogger("backtest")
 
 def fetch_bars(cfg: Settings, days: int) -> dict[str, tuple[list[float], list]]:
     client = StockHistoricalDataClient(cfg.api_key, cfg.secret_key)
-    start = datetime.now(timezone.utc) - timedelta(days=days)
+    start = datetime.now(UTC) - timedelta(days=days)
     out: dict[str, tuple[list[float], list]] = {}
     for sym in cfg.symbols:
-        bars = client.get_stock_bars(
+        bars = cast(BarSet, client.get_stock_bars(
             StockBarsRequest(
                 symbol_or_symbols=sym,
                 timeframe=TimeFrame(cfg.bar_timeframe_minutes, TimeFrameUnit.Minute),
                 start=start,
                 feed=DataFeed.IEX,
             )
-        ).data.get(sym, [])
+        )).data.get(sym, [])
         closes = [float(b.close) for b in bars]
         times = [b.timestamp for b in bars]
         log.info("%s: %d bars (%s -> %s)", sym, len(closes),

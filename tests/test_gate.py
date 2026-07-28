@@ -1,10 +1,9 @@
 """Holdout gate: verdict logic and — above all — burn-once refusal."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from bot.config import Settings
-
 from research import data, gate, registry
 
 
@@ -13,7 +12,7 @@ def _cfg(**kw) -> Settings:
 
 
 def _write_holdout(tmp_path: Path, symbol="AAA", n=400):
-    start = datetime(2026, 5, 1, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 1, 14, 30, tzinfo=UTC)
     times = [start + timedelta(minutes=15 * i) for i in range(n)]
     closes = []
     while len(closes) < n:

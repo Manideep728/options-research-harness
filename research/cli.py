@@ -18,7 +18,6 @@ from pathlib import Path
 
 from bot.config import Settings
 from bot.simulator import SimParams, SimResult
-
 from research import data, failure_report, gate, proposer, registry, robustness, search
 from research.families import FAMILIES
 
@@ -130,9 +129,9 @@ def main(argv: list[str] | None = None) -> int:
         bars = {s: data.load_bars("intraday", s, args.data_dir) for s in cfg.symbols}
         bars = {s: b for s, b in bars.items() if b[0]}
         train_w, _ = search.split_all(bars)
-        result = search.run_family(train_w, run_cfg, SimParams(), family, sig)
+        train_result = search.run_family(train_w, run_cfg, SimParams(), family, sig)
         text = failure_report.build_report(
-            result.trades, train_w,
+            train_result.trades, train_w,
             ema_fast=int(sig.get("ema_fast", cfg.ema_fast)),
             ema_slow=int(sig.get("ema_slow", cfg.ema_slow)),
         )
@@ -159,24 +158,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if (p_ok and r_ok) else 1
 
     if args.command == "gate":
-        outcome = gate.run_gate(candidate, cfg, data_dir=args.data_dir,
-                                registry_path=args.registry)
-        if outcome.refused:
-            print(f"REFUSED: {outcome.reason}")
+        gate_outcome = gate.run_gate(candidate, cfg, data_dir=args.data_dir,
+                                     registry_path=args.registry)
+        if gate_outcome.refused:
+            print(f"REFUSED: {gate_outcome.reason}")
             return 1
-        print(f"\ngate: {'PASSED' if outcome.passed else 'FAILED'} — {outcome.reason}")
-        _print_result("holdout", outcome.result)
-        if outcome.deflated_sharpe is not None:
-            print(f"deflated Sharpe confidence: {outcome.deflated_sharpe:.3f}")
-        print(f"holdout window {outcome.window_id} is now burned.")
-        if outcome.passed:
+        print(f"\ngate: {'PASSED' if gate_outcome.passed else 'FAILED'} — {gate_outcome.reason}")
+        _print_result("holdout", gate_outcome.result)
+        if gate_outcome.deflated_sharpe is not None:
+            print(f"deflated Sharpe confidence: {gate_outcome.deflated_sharpe:.3f}")
+        print(f"holdout window {gate_outcome.window_id} is now burned.")
+        if gate_outcome.passed:
             print("\nNext step is HUMAN judgment, not auto-deploy: paper-trade this "
                   "candidate for several weeks before considering promotion.")
             if candidate["family"] == "baseline":
                 print("(baseline family: params map onto tuned_params.json directly)")
             else:
                 print("(non-baseline family: live deployment needs a code change)")
-        return 0 if outcome.passed else 1
+        return 0 if gate_outcome.passed else 1
 
     return 1
 

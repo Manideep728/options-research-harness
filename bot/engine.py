@@ -6,7 +6,8 @@ so the whole cycle is testable with a fake broker.
 
 import logging
 import time
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dtime
 
 from bot import control, earnings, journal, risk, scanner, state, watchlist
 from bot.config import Settings
@@ -265,4 +266,4 @@ class Engine:
 
 
 def _day_start(now: datetime) -> datetime:
-    return datetime.combine(now.date(), dtime(0, 0), tzinfo=timezone.utc)
+    return datetime.combine(now.date(), dtime(0, 0), tzinfo=UTC)

@@ -1,0 +1,8 @@
+# Test + quality tooling. Install on top of requirements.txt:
+#   .venv\Scripts\pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+pytest==9.1.1
+httpx==0.28.1           # starlette TestClient transport (dashboard API tests)
+ruff==0.14.6            # lint + format
+mypy==1.19.0            # static type checking

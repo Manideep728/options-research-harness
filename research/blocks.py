@@ -23,10 +23,10 @@ Spec shape:
 import itertools
 import statistics
 from datetime import datetime
+from typing import Any
 
 from bot.indicators import ema, rsi
 from bot.strategy import Action
-
 from research.families import RSI_PERIOD, Family, _none_series, _rsi_cross
 
 TRENDS = ("ema_cross", "ema_slope", "none")
@@ -67,8 +67,12 @@ VOL_LOOKBACK = 14     # bars of returns for the entry-vol filters
 
 # --- validation ---
 
-def validate_spec(spec: dict) -> list[str]:
-    """All problems with a spec, as human/LLM-readable strings. [] = valid."""
+def validate_spec(spec: Any) -> list[str]:
+    """All problems with a spec, as human/LLM-readable strings. [] = valid.
+
+    Typed `Any` deliberately: the input is untrusted JSON from an LLM, so the
+    isinstance guards below are real runtime checks, not dead code.
+    """
     errors: list[str] = []
     if not isinstance(spec, dict):
         return ["spec must be a JSON object"]
@@ -87,7 +91,7 @@ def validate_spec(spec: dict) -> list[str]:
 
     grid = spec.get("grid", {})
     if not isinstance(grid, dict):
-        return errors + ["'grid' must be an object of param -> list of values"]
+        return [*errors, "'grid' must be an object of param -> list of values"]
     blocks = [spec.get("trend"), spec.get("trigger"), *filters]
     required = [p for b in blocks for p in REQUIRED_PARAMS.get(b, ())]
     for param in required:
@@ -126,12 +130,15 @@ def spec_candidates(spec: dict) -> list[dict]:
     keys = list(grid.keys())
     out = []
     for combo in itertools.product(*(grid[k] for k in keys)):
-        params = dict(zip(keys, combo))
+        params = dict(zip(keys, combo, strict=True))
         clamped = _clamp(params)
         # a near-equal EMA pair makes the trend filter meaningless
-        if "ema_fast" in clamped and "ema_slow" in clamped:
-            if clamped["ema_slow"] - clamped["ema_fast"] <= 3:
-                continue
+        if (
+            "ema_fast" in clamped
+            and "ema_slow" in clamped
+            and clamped["ema_slow"] - clamped["ema_fast"] <= 3
+        ):
+            continue
         out.append(clamped)
     return out
 
@@ -144,7 +151,7 @@ def _clamp(params: dict) -> dict:
             continue
         lo, hi = PARAM_BOUNDS[key]
         clamped = max(lo, min(hi, float(value)))
-        out[key] = int(round(clamped)) if isinstance(value, int) else clamped
+        out[key] = round(clamped) if isinstance(value, int) else clamped
     return out
 
 
@@ -176,7 +183,10 @@ def spec_signal(closes: list[float], times: list[datetime] | None,
 
     out = _none_series(n)
     for i in range(needed - 1, n):
-        if trigger == "rsi_cross":
+        # `r` is non-None exactly when the trigger is rsi_cross; testing it
+        # directly (rather than re-testing `trigger`) lets the type checker
+        # see that too.
+        if r is not None:
             action = _rsi_cross(r[i - 1], r[i], p["rsi_bull_level"],
                                 p["rsi_bear_level"], uptrend[i])
         else:
@@ -192,9 +202,10 @@ def spec_signal(closes: list[float], times: list[datetime] | None,
                 continue
             if "min_entry_vol" in filters and vols[i] < p["min_entry_vol"]:
                 continue
-        if "entry_hours" in filters:
-            if times is None or times[i].hour not in p["entry_hours"]:
-                continue
+        if "entry_hours" in filters and (
+            times is None or times[i].hour not in p["entry_hours"]
+        ):
+            continue
         out[i] = action
     return out
 

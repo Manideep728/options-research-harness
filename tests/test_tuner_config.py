@@ -3,13 +3,13 @@ rejection on thin evidence, and the tuned-file round trip."""
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot.config import Settings, apply_tuned_params, clamp_tunables
 from bot.simulator import SimResult, SimTrade
 from bot.tuner import MIN_TRADES, TuneOutcome, candidate_params, tune, write_tuned_params
 
-T0 = datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
 
 
 # --- clamping (guideline 2) ---

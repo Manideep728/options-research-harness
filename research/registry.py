@@ -10,7 +10,7 @@ that record is what makes the gate burn-once.
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).resolve().parent / "trials.jsonl"
@@ -54,7 +54,7 @@ def log_trial(path: Path, family: str, params: dict, window: str,
         "params": params,
         "window": window,
         "scores": scores,
-        "at": datetime.now(timezone.utc).isoformat(),
+        "at": datetime.now(UTC).isoformat(),
     })
 
 
@@ -71,7 +71,7 @@ def log_gate(path: Path, family: str, params: dict, window_id: str,
         "scores": scores,
         "passed": passed,
         "burned": True,
-        "at": datetime.now(timezone.utc).isoformat(),
+        "at": datetime.now(UTC).isoformat(),
     })
 
 

@@ -13,11 +13,13 @@ is written to data/holdout/, and only research/gate.py ever reads it.
 
 import csv
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical.stock import StockHistoricalDataClient
+from alpaca.data.models import BarSet
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -63,10 +65,10 @@ def bars_before(closes: list[float], times: list[datetime],
     """Bars strictly before `cutoff` — used to quarantine the holdout
     calendar window in the daily dataset too, so a daily-bar robustness
     check can't peek at the period the gate will judge on."""
-    kept = [(c, t) for c, t in zip(closes, times) if t < cutoff]
+    kept = [(c, t) for c, t in zip(closes, times, strict=True) if t < cutoff]
     if not kept:
         return [], []
-    kept_closes, kept_times = zip(*kept)
+    kept_closes, kept_times = zip(*kept, strict=True)
     return list(kept_closes), list(kept_times)
 
 
@@ -77,7 +79,7 @@ def save_bars(path: Path, closes: list[float], times: list[datetime]) -> None:
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "close"])
-        for t, c in zip(times, closes):
+        for t, c in zip(times, closes, strict=True):
             writer.writerow([t.isoformat(), f"{c:.6f}"])
 
 
@@ -136,13 +138,13 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
 
 def _fetch(client: StockHistoricalDataClient, symbol: str,
            timeframe: TimeFrame, days: int) -> Bars:
-    start = datetime.now(timezone.utc) - timedelta(days=days)
-    bars = client.get_stock_bars(
+    start = datetime.now(UTC) - timedelta(days=days)
+    bars = cast(BarSet, client.get_stock_bars(
         StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=timeframe,
             start=start,
             feed=DataFeed.IEX,
         )
-    ).data.get(symbol, [])
+    )).data.get(symbol, [])
     return [float(b.close) for b in bars], [b.timestamp for b in bars]
