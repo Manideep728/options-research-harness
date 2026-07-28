@@ -1,7 +1,7 @@
 """End-to-end cycle tests against a fake broker (no network)."""
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from bot import journal, watchlist
 from bot.broker import ClockInfo, Fill, OpenOrder
@@ -11,9 +11,9 @@ from bot.options import Contract
 from bot.risk import OpenPosition
 
 TODAY = date(2026, 7, 6)
-NOW = datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc)  # 11:00 ET, mid-session
-OPEN_T = datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
-CLOSE_T = datetime(2026, 7, 6, 20, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 6, 15, 0, tzinfo=UTC)  # 11:00 ET, mid-session
+OPEN_T = datetime(2026, 7, 6, 13, 30, tzinfo=UTC)
+CLOSE_T = datetime(2026, 7, 6, 20, 0, tzinfo=UTC)
 
 
 def bounce_closes() -> list[float]:

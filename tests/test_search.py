@@ -1,19 +1,17 @@
 """Search: select-on-train, registry logging, candidate handoff, simulator
 signal_fn regression."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from bot.config import Settings
 from bot.simulator import signal_series, simulate
 from bot.strategy import Action
-
 from research import data, registry, search
-from research.families import FAMILIES
 
 
 def _bars(n: int, sawtooth: bool = True) -> tuple[list[float], list[datetime]]:
-    start = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     times = [start + timedelta(minutes=15 * i) for i in range(n)]
     closes = []
     i = 0

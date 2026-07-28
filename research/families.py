@@ -12,9 +12,9 @@ future auto-proposer can escape the rails.
 """
 
 import itertools
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
 
 from bot.indicators import ema, rsi
 from bot.strategy import Action
@@ -175,7 +175,7 @@ def clamp_params(params: dict, bounds: dict[str, tuple[float, float]]) -> dict:
             continue
         value = max(lo, min(hi, float(params[key])))
         if isinstance(params[key], int):
-            value = int(round(value))
+            value = round(value)
         out[key] = value
     return out
 
@@ -184,7 +184,7 @@ def signal_candidates(family: Family) -> list[dict]:
     """Expand the family's grid into clamped candidate param dicts."""
     out = []
     for combo in itertools.product(*family.grid.values()):
-        raw = dict(zip(family.grid.keys(), combo))
+        raw = dict(zip(family.grid.keys(), combo, strict=True))
         if "ema_pair" in raw:
             raw["ema_fast"], raw["ema_slow"] = raw.pop("ema_pair")
         clamped = clamp_params(raw, family.bounds)

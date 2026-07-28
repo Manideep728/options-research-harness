@@ -18,13 +18,12 @@ import itertools
 import json
 import logging
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bot.config import Settings, clamp_tunables
 from bot.simulator import SimParams, SimResult, simulate
 from bot.tuner import IMPROVE_ABS_MARGIN, IMPROVE_FACTOR, MIN_TRADES
-
 from research import data, metrics, registry
 from research.families import EXIT_GRID, FAMILIES, Family, signal_candidates
 
@@ -82,7 +81,7 @@ def resolve_family(candidate: dict) -> Family:
 
 def _with_exits(signal_candidates_list: list[dict]) -> list[tuple[dict, dict]]:
     return [
-        (sig, clamp_tunables(dict(zip(EXIT_GRID.keys(), exits))))
+        (sig, clamp_tunables(dict(zip(EXIT_GRID.keys(), exits, strict=True))))
         for sig in signal_candidates_list
         for exits in itertools.product(*EXIT_GRID.values())
     ]
@@ -208,6 +207,11 @@ def _judge(family_name: str, sig: dict, exits: dict, train: SimResult,
 
 
 def _write_candidate(path: Path, o: SearchOutcome) -> None:
+    # Only accepted outcomes carry results. Writing a candidate without them
+    # would emit an evidence block full of nulls that later reads as fact —
+    # refuse instead.
+    if o.train is None or o.val is None or o.baseline_val is None:
+        raise ValueError("cannot write a candidate without train/val/baseline results")
     payload = {
         "family": o.family,
         "signal_params": o.signal_params,
@@ -220,7 +224,7 @@ def _write_candidate(path: Path, o: SearchOutcome) -> None:
             "val_win_rate": round(o.val.win_rate, 4),
             "baseline_val_expectancy": round(o.baseline_val.expectancy, 4),
         },
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     if o.spec is not None:
         payload["spec"] = o.spec

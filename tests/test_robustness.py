@@ -1,10 +1,9 @@
 """Robustness: perturbation grid shape/verdict and daily regime folds."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot.config import Settings
 from bot.simulator import SimParams
-
 from research import data, robustness
 from research.families import FAMILIES
 
@@ -14,7 +13,7 @@ def _cfg(**kw) -> Settings:
 
 
 def _sawtooth_bars(n, start_year=2026, step_minutes=15):
-    start = datetime(start_year, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(start_year, 1, 5, 14, 30, tzinfo=UTC)
     times = [start + timedelta(minutes=step_minutes * i) for i in range(n)]
     closes = []
     while len(closes) < n:
@@ -50,7 +49,7 @@ def test_daily_regime_check_requires_enough_folds(tmp_path):
     closes, times = _sawtooth_bars(30, step_minutes=60 * 24)
     data.save_bars(tmp_path / "daily" / "AAA.csv", closes, times)
     cfg = _cfg(symbols=("AAA",))
-    passed, rows = robustness.daily_regime_check(
+    passed, _rows = robustness.daily_regime_check(
         cfg, FAMILIES["rsi_only"],
         {"rsi_bull_level": 40.0, "rsi_bear_level": 60.0}, data_dir=tmp_path)
     assert not passed

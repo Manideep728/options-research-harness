@@ -1,14 +1,14 @@
 """Dashboard snapshot: must poll only the engine's active shortlist, not the
 whole universe (that was the whole point of the two-tier scan)."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, datetime
 
 from bot.config import Settings
 from bot.dashboard import build_dashboard_snapshot
 from bot.watchlist import ActiveEntry, save_active
 
-NOW = datetime(2026, 7, 9, 15, 0, tzinfo=timezone.utc)
-CLOSE_T = datetime(2026, 7, 9, 20, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 9, 15, 0, tzinfo=UTC)
+CLOSE_T = datetime(2026, 7, 9, 20, 0, tzinfo=UTC)
 
 
 class ClockInfo:

@@ -39,10 +39,14 @@ def entry_allowed(
 ) -> GateResult:
     """All gates must pass before we even look at the option chain."""
     if trades_today >= cfg.max_trades_per_day:
-        return GateResult(False, f"daily trade limit reached ({trades_today}/{cfg.max_trades_per_day})")
+        return GateResult(
+            False, f"daily trade limit reached ({trades_today}/{cfg.max_trades_per_day})"
+        )
 
     if len(positions) >= cfg.max_positions:
-        return GateResult(False, f"max concurrent positions reached ({len(positions)}/{cfg.max_positions})")
+        return GateResult(
+            False, f"max concurrent positions reached ({len(positions)}/{cfg.max_positions})"
+        )
 
     held = sum(1 for p in positions if p.underlying == underlying)
     if held >= cfg.max_positions_per_underlying:
@@ -66,7 +70,8 @@ def size_allowed(premium_per_share: float, equity: float, cfg: Settings) -> Gate
     if cost > limit:
         return GateResult(
             False,
-            f"premium ${cost:.2f} exceeds {cfg.max_premium_pct_of_equity:.0%} of equity (${limit:.2f})",
+            f"premium ${cost:.2f} exceeds "
+            f"{cfg.max_premium_pct_of_equity:.0%} of equity (${limit:.2f})",
         )
     return GateResult(True, f"premium ${cost:.2f} within ${limit:.2f} limit")
 

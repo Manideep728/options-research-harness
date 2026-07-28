@@ -1,13 +1,13 @@
 """Tests for the research bar cache: splits, embargo, holdout quarantine."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from research import data
 
 
 def _bars(n: int) -> tuple[list[float], list[datetime]]:
-    start = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     times = [start + timedelta(minutes=15 * i) for i in range(n)]
     closes = [100.0 + i for i in range(n)]
     return closes, times

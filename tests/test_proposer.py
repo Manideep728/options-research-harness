@@ -1,13 +1,11 @@
 """Proposer: prompt building, offline mode, validation retry, spec search."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from bot.config import Settings
-
 from research import data, proposer, registry, search
-
 
 GOOD_SPEC = {
     "name": "calm-uptrend-calls",
@@ -103,7 +101,7 @@ def test_two_invalid_specs_fail(tmp_path):
 # --- spec search end-to-end on synthetic cache ---
 
 def _write_cache(tmp_path: Path, symbols=("AAA", "BBB"), n=600):
-    start = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     for sym in symbols:
         closes: list[float] = []
         while len(closes) < n:

@@ -138,7 +138,7 @@ def clamp_tunables(params: dict) -> dict:
             continue
         value = max(lo, min(hi, float(params[key])))
         if isinstance(getattr(Settings, key), int):
-            value = int(round(value))
+            value = round(value)
         out[key] = value
     # A near-equal EMA pair would make the trend filter meaningless;
     # require the slow period to exceed the fast by more than 3.

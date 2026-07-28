@@ -1,7 +1,7 @@
 """Build live dashboard snapshots from the existing bot surfaces."""
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from bot import control, journal, risk, state, watchlist
 from bot.broker import Fill
@@ -127,8 +127,16 @@ def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
         symbol = entry.symbol
         closes = broker.get_closes(symbol)
         signal = evaluate(closes, cfg)
-        trend = "up" if signal.action == Action.BUY_CALL else "down" if signal.action == Action.BUY_PUT else "flat"
-        gate = risk.entry_allowed(symbol, gate_positions, trades_today, equity, day_state.day_start_equity or last_equity, cfg)
+        if signal.action == Action.BUY_CALL:
+            trend = "up"
+        elif signal.action == Action.BUY_PUT:
+            trend = "down"
+        else:
+            trend = "flat"
+        gate = risk.entry_allowed(
+            symbol, gate_positions, trades_today, equity,
+            day_state.day_start_equity or last_equity, cfg,
+        )
         underlying_price: float | None = None
         contract_snapshot: ContractSnapshot | None = None
         size_allowed: bool | None = None
@@ -139,7 +147,9 @@ def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
             underlying_price = broker.get_underlying_price(symbol)
             want = "call" if signal.action == Action.BUY_CALL else "put"
             chain = broker.get_chain(symbol, want, clock.now.date(), underlying_price)
-            contract, rejects = pick_contract(chain, signal.action, underlying_price, clock.now.date(), cfg)
+            contract, rejects = pick_contract(
+                chain, signal.action, underlying_price, clock.now.date(), cfg
+            )
             rejections = [asdict(r) for r in rejects[:5]]
             if contract is not None:
                 contract_snapshot = ContractSnapshot(
@@ -236,7 +246,7 @@ def build_dashboard_snapshot(broker, cfg: Settings) -> DashboardSnapshot:
     )
 
     return DashboardSnapshot(
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
         market={
             "is_open": clock.is_open,
             "now": clock.now.isoformat(),
@@ -297,10 +307,12 @@ def _build_position_snapshots(positions, cfg: Settings) -> list[PositionSnapshot
     return out
 
 
-def _exit_reason(position: risk.OpenPosition, cfg: Settings, entry_time: datetime | None) -> str | None:
+def _exit_reason(
+    position: risk.OpenPosition, cfg: Settings, entry_time: datetime | None
+) -> str | None:
     held_days = None
     if entry_time is not None:
-        held_days = (datetime.now(timezone.utc) - entry_time).total_seconds() / 86400
+        held_days = (datetime.now(UTC) - entry_time).total_seconds() / 86400
     return risk.exit_reason(position, cfg, held_days)
 
 
@@ -319,4 +331,4 @@ def _pct(delta: float, base: float) -> float:
 
 
 def _day_start(now: datetime) -> datetime:
-    return datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc)
+    return datetime.combine(now.date(), datetime.min.time(), tzinfo=UTC)

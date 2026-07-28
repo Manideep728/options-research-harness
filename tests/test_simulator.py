@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot.config import Settings
 from bot.simulator import SimParams, signal_series, simulate
@@ -6,7 +6,7 @@ from bot.strategy import evaluate
 
 CFG = Settings(api_key="", secret_key="")
 SP = SimParams(delta=0.40, premium_pct_of_spot=0.005, theta_daily=0.05, roundtrip_cost=0.03)
-T0 = datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
 
 
 def bounce_closes() -> list[float]:

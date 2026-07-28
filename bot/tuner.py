@@ -26,7 +26,7 @@ import itertools
 import json
 import logging
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from bot.atomic import atomic_write_text
 from bot.config import Settings, clamp_tunables
@@ -90,7 +90,7 @@ def run_all(windows: dict[str, tuple[list[float], list]], cfg: Settings,
 def candidate_params() -> list[dict]:
     out = []
     for combo in itertools.product(*GRID.values()):
-        raw = dict(zip(GRID.keys(), combo))
+        raw = dict(zip(GRID.keys(), combo, strict=True))
         ema_fast, ema_slow = raw.pop("ema_pair")
         raw["ema_fast"], raw["ema_slow"] = ema_fast, ema_slow
         clamped = clamp_tunables(raw)  # guideline 2
@@ -149,6 +149,10 @@ def tune(bars_by_symbol: dict[str, tuple[list[float], list]], cfg: Settings,
 
 
 def write_tuned_params(path: str, outcome: TuneOutcome) -> None:
+    # Only an accepted outcome has both windows' results. Writing without them
+    # would put null evidence next to live trading params — refuse instead.
+    if outcome.best_val is None or outcome.current_val is None:
+        raise ValueError("cannot write tuned params without validation evidence")
     payload = {
         "params": outcome.params,
         "evidence": {
@@ -158,7 +162,7 @@ def write_tuned_params(path: str, outcome: TuneOutcome) -> None:
             "validation_profit_factor": round(outcome.best_val.profit_factor, 4),
             "previous_val_expectancy": round(outcome.current_val.expectancy, 4),
         },
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
     atomic_write_text(path, json.dumps(payload, indent=2))
     log.info("wrote %s: %s", path, outcome.params)

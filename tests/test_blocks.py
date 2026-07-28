@@ -1,9 +1,8 @@
 """Spec vocabulary: validation, clamping, candidate expansion, composition."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot.strategy import Action
-
 from research import blocks, families
 
 
@@ -28,7 +27,7 @@ def _sawtooth(n: int = 240) -> tuple[list[float], list[datetime]]:
     while len(closes) < n:
         closes += [100.0 + j for j in range(12)]
         closes += [111.0 - j for j in range(12)]
-    start = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     return closes[:n], [start + timedelta(minutes=15 * i) for i in range(n)]
 
 

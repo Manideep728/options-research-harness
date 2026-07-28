@@ -1,10 +1,10 @@
 """Active-shortlist persistence tests."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from bot.watchlist import ActiveEntry, load_active, save_active
 
-RANKED_AT = datetime(2026, 7, 9, 15, 0, tzinfo=timezone.utc)
+RANKED_AT = datetime(2026, 7, 9, 15, 0, tzinfo=UTC)
 
 
 def test_missing_file_is_empty_shortlist(tmp_path):

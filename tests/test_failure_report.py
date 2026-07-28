@@ -1,14 +1,13 @@
 """Failure report: bucket math and bar-context joins."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from bot.simulator import SimTrade
-
 from research import failure_report
 
 
 def _times(n: int) -> list[datetime]:
-    start = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     return [start + timedelta(minutes=15 * i) for i in range(n)]
 
 

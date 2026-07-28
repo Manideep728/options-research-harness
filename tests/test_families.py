@@ -1,7 +1,6 @@
 """Strategy families: signal correctness, causality shape, clamping."""
 
 from bot.strategy import Action
-
 from research import families
 
 
