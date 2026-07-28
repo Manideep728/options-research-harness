@@ -4,6 +4,8 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -22,7 +24,17 @@ broker = AlpacaBroker(cfg)
 ROOT = Path(__file__).resolve().parent
 MAIN_SCRIPT = ROOT / "main.py"
 
-app = FastAPI(title="Trading Bot Dashboard API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Nothing to set up; on shutdown, never leave an orphaned engine running
+    against the paper account after its controlling API is gone."""
+    yield
+    if _engine_running():
+        _terminate_engine()
+
+
+app = FastAPI(title="Trading Bot Dashboard API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -153,12 +165,6 @@ def close_position(symbol: str) -> dict:
     except Exception as exc:  # pragma: no cover - surfaces broker errors verbatim
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"ok": True, "symbol": symbol}
-
-
-@app.on_event("shutdown")
-def _stop_engine_on_shutdown() -> None:
-    if _engine_running():
-        _terminate_engine()
 
 
 if __name__ == "__main__":
