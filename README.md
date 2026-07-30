@@ -1,46 +1,187 @@
-# A Research Harness That Makes It Hard to Fool Yourself
+# The Backtester Was Lying, and I Built the Test That Caught It
 
 [![CI](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml)
 
-Backtesting lies. Search 700 strategy variants and the best one always looks
-profitable — not because it works, but because you searched 700 times. This
-repo is an attempt to build the machinery that stops that from happening, with
-a live options bot on an **Alpaca paper account** as the thing being tested.
+An options trading bot on an **Alpaca paper account**, plus the research harness
+that evaluates it. The interesting part is not the bot. It's that the harness
+searched 986 strategy configurations, reported plausible numbers for all of
+them, and every one of those numbers was wrong — because of four lines in the
+simulator's exit loop.
 
-Where it currently stands, stated exactly:
+This README leads with that bug, because finding it is the work.
 
-> **986 candidate configurations have been searched and logged.** The three
-> hand-written strategy families produced **zero** that cleared the bar. The
-> first candidate to survive came from the LLM proposer — it reads the failure
-> report, and hypothesized "trade calls only, only in uptrends, only when
-> volatility is calm." That one cleared the search stage at +35.4% validation
-> expectancy over 32 trades, against the live strategy's +5.2%.
->
-> **It has not passed anything yet.** It is queued for the burn-once holdout
-> gate, which has never been run. Nothing is deployed. A +35% number selected
-> out of 986 tries is exactly the kind of result this repo exists to distrust —
-> which is why the gate scores it as a *deflated* Sharpe against N=986, and
-> why the holdout is consumed on the single attempt.
+## The bug
 
-Every one of those 986 trials is committed to this repo, because that count is
-the denominator of every claim the pipeline makes about itself.
+`bot/simulator.py` has no option prices. It approximates:
 
-**What enforces the honesty** (details in [Research loop](#research-loop-research)):
+```
+option_return = underlying_move × gearing − theta × days − roundtrip_cost
+```
 
-| Guard | The failure it prevents |
-|---|---|
-| **Committed trial registry** | A local-only log resets `N` to 0 on a fresh clone, and every result silently looks better than it is. |
-| **Deflated Sharpe ratio** | Scores a result against *the best of N tries*, so a lucky winner out of 759 stops reading as skill. |
-| **Burn-once holdout** | The out-of-sample window is consumed after a single gate attempt — pass or fail — so it can't be retried until it flatters. |
-| **Select on train, touch validation once** | Ranking candidates by validation score and then reporting that score is selection bias. |
-| **Quarantined + embargoed holdout** | Cut at the same calendar moment across both datasets, so no daily-bar check can peek at the gate's window. |
-| **LLM proposes specs, never code** | The proposer picks from a fixed block vocabulary with clamped params and a capped grid — it cannot smuggle in arbitrary logic. |
-| **No auto-deploy, ever** | A gate pass prints evidence for human review. Risk caps are in no search space. |
+with `gearing = delta / premium_pct_of_spot = 0.40 / 0.005 = **80×**`.
+
+At 80×, the exits trigger on almost no movement: `take_profit_pct = 0.50` needs
+a **+0.625%** move in the underlying, and `stop_loss_pct = 0.25` needs **−0.31%**.
+A normal daily bar moves ±2%, i.e. 3–6× past *both* barriers at once. The exit
+loop detected the crossing and then recorded **the bar's full return**, not the
+barrier — and that return was floored at −100% on the loss side (correct for an
+option premium) while the gain side was unbounded:
+
+| next daily bar | raw model return | what the code booked |
+|---|---|---|
+| stock **+2%** | +152% | **+152%** — though it claimed to exit at +50% |
+| stock **−2%** | −168% | **−100%** — though it claimed to exit at −25% |
+
+Same size move, opposite sign. The win books +152%, the loss books −100%.
+Symmetric price noise, asymmetric P&L: **volatility alone produced expectancy,
+with no forecast involved.** The repo's own `research/report.txt` had been
+showing the symptom all along — stop-losses averaging **−44.4%** against a −30%
+stop, take-profits **+51.8%** against a +40% target — and nobody read it as a
+bug.
+
+Isolated by varying that one function, same coin-flip signal, same bars:
+
+| how barrier exits are booked | daily bars | 15-min bars |
+|---|---|---|
+| **as the code did it** (overshoot, floored at −100%) | **+11.1%** | −3.1% |
+| book the barrier level it claimed to exit at | +5.1% | −0.3% |
+| overshoot with no −100% floor (symmetric) | −19.8% | −5.2% |
+
+The floor alone was worth **31 percentage points** of phantom edge.
+
+## The test that catches it
+
+A random signal should earn about zero, minus costs. Nothing in this repo had
+ever checked. `research/null.py` checks, and it is wired in as a *threshold*,
+not a report:
+
+```powershell
+.venv\Scripts\python -m research null --window daily --trades 1200
+```
+```
+null: 60 seeds, mean trades=1163
+  mean expectancy      +14.74%
+  p95 threshold        +25.70%
+
+WARNING: a coin flip EARNS +14.74% per trade here. A signal-free strategy should
+pay the spread, not collect it, so the P&L model is not valid on these bars —
+treat every number computed on them as unusable, not merely optimistic.
+```
+
+That +14.74% was enough to pass `robustness.daily_regime_check`, whose only
+criterion was `expectancy > 0`. **The repo's sole multi-regime guard could not
+fail a zero-skill signal.** It now requires a fold to beat its own null's 95th
+percentile; `donchian` passed all six folds under the old rule and fails all six
+under this one.
+
+The random signal is deliberately built as a real `Family` and run through
+`search.run_family` — the identical code path a genuine candidate takes. A null
+with its own private simulator would drift away from the thing it is supposed to
+be measuring, which is the exact class of bug it exists to catch.
+
+## Two more defects the same audit turned up
+
+**Un-tradeable bars.** 10,485 of 166,473 cached bars (**6.30%**) fell outside
+09:30–16:00 ET. US listed options don't trade then, so an "exit" priced off an
+08:00 ET print is a fill that could never have happened. Filtering now happens
+at fetch time *and* on read, so the existing cache is corrected rather than
+waiting for someone to remember to refetch.
+
+**Unadjusted prices.** `adjustment` was never set on the Alpaca request, so the
+daily cache contained a −95.1% single "day" in GOOGL (its 20:1 split), −94.9%
+in AMZN, −90.1% in NFLX, −89.9% in NVDA. At 80× gearing a put "earns" +7,600%
+on that, inside the multi-year regime check.
+
+## What it did to the headline result
+
+The previous version of this README led with a candidate at "+35.4% validation
+expectancy over 32 trades, against the live strategy's +5.2%." Re-measured after
+the fixes:
+
+| window | candidate | its own coin-flip null | verdict |
+|---|---|---|---|
+| **train** (what it was selected on) | −3.28% over 148 trades | mean −2.63%, p95 +6.38% | **38.3rd percentile — worse than random** |
+| **validation** | +37.12% over 25 trades | mean −3.98%, p95 +16.74% | beats the null, but 25 < the 30-trade floor |
+
+It cannot beat a coin flip on the data it was selected on. It would no longer be
+accepted by `search`, and the burn-once holdout gate has still never been run —
+which is the correct outcome, not a disappointment. Every one of the 986 logged
+trials remains committed and counted in `N`, because those attempts genuinely
+happened; they are marked non-comparable by a `dataset_change` row rather than
+deleted.
 
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
 endpoint. Nothing here is financial advice, and the live strategy has **no
-demonstrated edge** — the risk caps exist to contain the damage while evidence
+demonstrated edge** — four completed round trips on the paper account, all four
+losers, −$600 realized. The risk caps exist to contain the damage while evidence
 accumulates.
+
+## One broker interface, two implementations
+
+There was a second problem, structural rather than arithmetic: **the backtest
+tested a different system than the one that trades.**
+
+`simulate()` reads 8 of the ~40 fields in `Settings`. It knows the signal and
+the exits. It has never known about `max_positions` (3), `max_trades_per_day`
+(3), `max_positions_per_underlying`, `signal_cooldown_sec` (30 min),
+`active_list_size` (only 5 of 30 names are ever polled),
+`skip_open_minutes`/`skip_close_minutes`, the earnings blackout,
+`min_open_interest`, or `max_spread_pct_of_mid`.
+
+The fix needed no rewrite, because `bot/engine.py` was already built for it:
+
+> Depends only on the broker interface (duck-typed), never on alpaca directly,
+> so the whole cycle is testable with a fake broker.
+> — `bot/engine.py`, line 3
+
+`tests/test_engine.py` already proved that interface is **11 methods** wide.
+So `research/replay.py` implements the same 11 methods against the CSV bar cache,
+and `Engine.run_cycle()` — the real one, with the real `bot/risk.py`,
+`bot/scanner.py` and `bot/options.py` running inside it — becomes the thing
+under test. A one-hour spike confirmed this before the class was written:
+driving `run_cycle` off cached bars required **zero edits to `bot/engine.py`**.
+
+```powershell
+.venv\Scripts\python -m research replay --window val --compare
+```
+```
+                trades   expectancy
+simulate()         251       +5.91%     <- no caps, no cooldown, no shortlist
+real engine         30      +32.74%     <- every risk gate active
+```
+
+The engine takes **12%** of the simulator's trades. Those are not two estimates
+of one system; they are two systems.
+
+Two invariants that file has to hold, both pinned by tests:
+
+- **Causality.** `get_closes(symbol)` returns bars up to and including `now` and
+  never one further, truncated to `bar_history_count` exactly as the live broker
+  does. A leak here would be invisible and would make every result meaningless.
+- **One P&L model.** Open positions reprice through
+  `bot.simulator.option_return` — the same function `simulate()` uses. This is a
+  transitional state, stated plainly: `simulate()` stays for fast grid search and
+  should be deleted once replay is fast enough to search with. Two pricing models
+  is the drift this module exists to remove.
+
+What replay still does **not** model: real option quotes (the chain is
+synthesized from `SimParams`, so no IV, no smile, no term structure); the
+limit-order lifecycle, since buys fill at the ask whereas the live engine posts a
+marketable limit and cancels it unfilled after 120s — so adversely-selected
+non-fills are absent; partial fills; assignment; multi-contract sizing.
+
+### A live-engine bug replay found on its first real run
+
+`option_return` floors at −100%, so a total loss prices a position at exactly
+`0.0` — and `manage_exits` skips any position with `current_price <= 0` (*"no
+price; skipping exit check"*). Live, a dying option really can quote a zero bid.
+So a worthless position is **never closed** and permanently occupies one of the
+three `max_positions` slots.
+
+It is reproduced by a test and deliberately **not fixed**: `close_option` posts a
+limit at the bid, and a limit at zero is meaningless, so the fix requires
+deciding how the live bot abandons a worthless position. That's a trading
+decision, not a refactor.
 
 ![Dashboard — live signal reasoning, risk gates, and bot controls](docs/dashboard.png)
 
@@ -96,10 +237,14 @@ flowchart LR
 
     subgraph research["Research loop (offline — never imported by the bot)"]
         search["search.py<br/>train-only grid search"]
+        nullmod["null.py<br/>coin-flip control"]
+        replaymod["replay.py<br/>ReplayBroker"]
         gate["gate.py<br/>burn-once holdout verdict"]
         proposer["proposer.py<br/>LLM strategy specs (JSON, never code)"]
         proposer --> search --> gate
+        nullmod --> search
     end
+    replaymod -. "same 11-method interface as broker.py" .-> engine
     gate -. "evidence for manual review" .-> tuned
 ```
 
@@ -236,14 +381,18 @@ Accepted changes are written to `tuned_params.json` **with their evidence**;
 the bot applies them (re-clamped) on next start. If nothing qualifies, the
 current parameters stand.
 
-**Honest numbers** (365 days ending 2026-07-07, all costs modeled): default
-params full-period expectancy was **−2.9%** of premium per trade across 117
-trades — i.e. no demonstrated edge. The `tuned_params.json` checked into this
-repo has evidence (+15.65% validation expectancy, 46 trades) generated by an
-earlier version of the tuner that selected its winner on the validation
-window itself — selection bias inflates that number, so treat it as stale.
-Re-run `backtest.py --tune` to regenerate evidence under the corrected
-train-then-validate selection above.
+Note that `--tune` uses a **single chronological train/validation split**, not
+walk-forward analysis — there are no rolling windows and no re-fit sequence. This
+README used to call it walk-forward, which was wrong.
+
+**Honest numbers.** The `tuned_params.json` checked into this repo carries
+evidence (+15.65% validation expectancy, 46 trades) that is stale twice over:
+it was generated by an earlier tuner that selected its winner on the validation
+window itself, *and* it predates the simulator fix above. The live bot still
+loads it on start, which is the least defensible thing in the repo right now.
+Re-run `backtest.py --tune` to regenerate under the corrected selection and the
+corrected P&L model, and expect most previously "profitable" configurations to
+invert — that is the fix working, not a regression.
 
 ## Research loop (`research/`)
 
@@ -254,9 +403,25 @@ never imports it). The cycle:
 .venv\Scripts\python -m research fetch            # cache bars once; splits off a quarantined holdout
 .venv\Scripts\python -m research search --family baseline   # select on TRAIN, judge on validation
 .venv\Scripts\python -m research report           # failure analysis of train trades (you read this)
-.venv\Scripts\python -m research robustness       # simulator-perturbation + daily regime checks
+.venv\Scripts\python -m research null             # what a coin flip earns on the same bars
+.venv\Scripts\python -m research replay --compare # the REAL engine over cached bars
+.venv\Scripts\python -m research robustness       # perturbation + daily regime check vs the null
 .venv\Scripts\python -m research gate             # burn-once out-of-sample verdict
 ```
+
+**What enforces the honesty:**
+
+| Guard | The failure it prevents |
+|---|---|
+| **Coin-flip null** | A guard that only asks `expectancy > 0` passes a random signal whenever the P&L model is broken. This is the one that caught everything above. |
+| **Committed trial registry** | A local-only log resets `N` to 0 on a fresh clone, and every result silently looks better than it is. |
+| **Dataset-keyed trial identity** | A score keyed on the string `"train"` survives `fetch` moving the split boundaries, so the searcher reuses a number computed on different bars. |
+| **Deflated Sharpe ratio** | Scores a result against *the best of N tries*, so the luckiest of 986 stops reading as skill. |
+| **Burn-once holdout** | The out-of-sample window is consumed after a single gate attempt — pass or fail — so it can't be retried until it flatters. |
+| **Select on train, touch validation once** | Ranking candidates by validation score and then reporting that score is selection bias. |
+| **Quarantined + embargoed holdout** | `load_bars()` raises on `kind="holdout"`; exactly one function can reach that directory. |
+| **LLM proposes specs, never code** | The proposer picks from a fixed block vocabulary with clamped params and a capped grid — it cannot smuggle in arbitrary logic. |
+| **No auto-deploy, ever** | A gate pass prints evidence for human review. Risk caps are in no search space. |
 
 Families: `baseline` (live EMA+RSI), `ema_slope`, `donchian`, `rsi_only`
 (control). Honesty machinery: every candidate ever scored is logged to an
@@ -276,28 +441,35 @@ The data cache under `research/data/` is *not* committed (large, and
 re-fetchable from Alpaca); a fresh clone runs `fetch` once before searching.
 
 **A worked example** (30-name universe, 365d of 15-min bars). Searching the
-hand-written families produced **759 logged trials and zero accepted winners**:
+hand-written families produced **~841 logged trials and zero accepted winners**:
 the selective RSI configs that survived the train filter fired too few times to
-clear the ≥30-trade validation floor (`baseline` +33.8% but only 20 trades;
-`ema_slope` +36.0% on 17), while the two families that traded often enough were
-negative after costs (`donchian` −1.2% over 3,143 trades; `rsi_only`, the
-deliberate control, −2.2% over 2,230). Note the shape of that failure — the
-configs that *looked* best were the ones with almost no evidence behind them.
-That is precisely what the trade floor exists to catch, and the registry
-preserves those results so the same configs are never re-tested.
+clear the ≥30-trade validation floor, while the two families that traded often
+enough were negative after costs (`donchian` over 3,143 trades; `rsi_only`, the
+deliberate control, over 2,230). Note the shape of that failure — the configs
+that *looked* best were the ones with almost no evidence behind them. That is
+precisely what the trade floor exists to catch.
 
-Phase 2 changed the outcome. Given the failure report, the LLM proposer
-observed that uptrend entries averaged +35.1% against +4.0% in downtrends, and
-calm-volatility entries +52.5% against −2.2% in high volatility — then composed
-those two observations into `calm-uptrend-calls` (`calls_only` +
-`max_entry_vol`, spec in `research/proposals/`). Its winner is the first
-candidate to clear the search stage: **32 validation trades at +35.4%
-expectancy**, versus +5.2% for the live strategy on the same window. The
-registry now holds 986 unique trials.
+Phase 2 appeared to change the outcome. Given the failure report, the LLM
+proposer observed that uptrend entries scored far better than downtrend ones and
+calm-volatility entries far better than high-volatility ones, then composed those
+into `calm-uptrend-calls` (`calls_only` + `max_entry_vol`, spec in
+`research/proposals/`). Its winner was the first candidate ever to clear the
+search stage, at 986 unique trials.
 
-That candidate's status is *pending*, not *proven*. It still has to survive the
-burn-once holdout gate, where its Sharpe is deflated against N=986 — and one
-attempt is all it gets.
+**It did not survive the audit.** See [What it did to the headline
+result](#what-it-did-to-the-headline-result): re-measured with the exit
+accounting fixed and un-tradeable bars removed, it sits at the 38.3rd percentile
+of its own coin-flip null on the window it was selected on. The specific numbers
+that were quoted here — 32 validation trades at +35.4% against the live
+strategy's +5.2% — were produced by the broken model and are not reproducible.
+The registry still counts all 986 attempts, marked non-comparable rather than
+deleted, because that count is the honest denominator for anything claimed about
+the old data.
+
+The burn-once holdout gate has never been run, and should not be run on this
+candidate. Burning the one-shot out-of-sample window on a result the null already
+rejects would spend the only irreversible resource in the repo on a foregone
+conclusion.
 
 **Phase 2 — the LLM proposer.** `python -m research propose` sends the
 failure report + trial history to Claude, which proposes the next family as
@@ -313,7 +485,7 @@ The gate stays human-invoked and burn-once regardless of who proposed.
 ## Tests & quality gates
 
 ```powershell
-.venv\Scripts\python -m pytest tests -q   # 205 tests
+.venv\Scripts\python -m pytest tests -q   # 247 tests
 .venv\Scripts\python -m ruff check .      # lint
 .venv\Scripts\python -m mypy              # type check
 cd web; npm run lint; npm run build       # frontend
@@ -321,19 +493,38 @@ cd web; npm run lint; npm run build       # frontend
 
 CI runs all five on every push and pull request.
 
-205 tests cover the indicator math (including a known Wilder RSI value),
-signal triggers, contract filters, every risk gate, journal P&L matching
-(incl. partial-fill FIFO), the simulator (verified bar-for-bar identical to
-the live signal logic), the tuner guardrails (clamping, non-tunable risk
-caps, thin-evidence rejection, train-then-validate selection), the scanner
-scoring/ranking, the earnings blackout, the active-shortlist persistence, the
-dashboard snapshot (shortlist-only polling), full engine cycles against a fake
-broker (entries, exits, order reconciliation, stale-order cancels, max-hold
-via journal, two-tier ranking, cooldown, blackout), the engine PID lock, the
-atomic file writer, the research loop (holdout splits/embargo, deflated
-Sharpe, burn-once gate, select-on-train search, and registry-aware skip of
-already-scored candidates), and the dashboard API — whose CSRF guard and
-single-engine PID check are each verified to fail the suite when removed.
+The tests worth reading first are the ones that pin the findings above:
+
+- `test_intra_session_barrier_ignores_overshoot_size` — two very different
+  overshoots past the same stop must book the same loss. The old code booked
+  −0.51 and −1.00 where it now books −0.25 twice.
+- `test_regime_guard_rejects_a_coin_flip` — a zero-skill signal must not pass the
+  multi-regime check. This is the regression test for the whole audit.
+- `test_get_closes_never_returns_a_bar_at_or_after_now` — the replay causality
+  contract, checked at every step rather than once.
+- `test_positions_reprice_through_the_shared_option_model` — replay must not grow
+  a second P&L model.
+- `test_daily_bars_are_never_session_filtered` — the session filter would delete
+  the entire daily cache if it were applied to 00:00 ET daily timestamps.
+- `test_in_session_follows_dst_not_a_fixed_utc_offset` — 13:30 UTC is 09:30 EDT
+  in July and 08:30 EST in January; a hard-coded window is wrong half the year.
+- `test_same_params_on_a_different_dataset_is_a_different_trial` — the stale
+  score-reuse bug.
+- `test_mutating_route_rejected_without_csrf_header` — parametrized across every
+  mutating dashboard route, and verified to fail the suite when the guard is
+  removed.
+
+The rest cover indicator math (including a known Wilder RSI value), signal
+triggers, contract filters, every risk gate, journal P&L matching (incl.
+partial-fill FIFO), the simulator's equivalence with the live signal at every
+bar prefix, tuner guardrails (clamping, non-tunable risk caps, thin-evidence
+rejection, train-then-validate selection), scanner ranking, the earnings
+blackout, shortlist persistence, the dashboard snapshot, full engine cycles
+against a fake broker (entries, exits, order reconciliation, stale-order
+cancels, max-hold via journal, two-tier ranking, cooldown, blackout), the
+engine PID lock, the atomic file writer, and the research loop (holdout
+splits/embargo, deflated Sharpe, burn-once gate, select-on-train search,
+registry-aware skip).
 
 ## Layout
 
@@ -347,8 +538,8 @@ bot/strategy.py    signal logic (pure)
 bot/earnings.py    earnings blackout gate + earnings.json loader
 bot/options.py     contract selection + liquidity gates (pure)
 bot/risk.py        entry gates, sizing, exit rules incl. max hold (pure)
-bot/simulator.py   backtest engine + option P&L model (pure)
-bot/tuner.py       guarded grid search + walk-forward validation
+bot/simulator.py   fast backtest engine + THE option P&L model (pure)
+bot/tuner.py       guarded grid search + one chronological train/val split
 bot/journal.py     trades.csv fill journal, FIFO realized P&L
 bot/state.py       daily counters persisted to state.json
 bot/watchlist.py   active shortlist persisted to active.json (engine -> dashboard)
@@ -359,12 +550,15 @@ bot/engine.py      the loop: clock -> reconcile -> exits -> re-rank (due) -> pol
 dashboard_api.py   FastAPI backend for the web dashboard; also starts/stops main.py on request
 run_dashboard.py   launches API + web frontend together (Python-side alternative to npm run dev)
 
-research/data.py       bar cache + train/val/holdout splits with calendar embargo
+research/data.py       bar cache, session filter, train/val/holdout splits + embargo
 research/families.py   built-in strategy families (baseline, ema_slope, donchian, rsi_only)
 research/blocks.py     the fixed block vocabulary an LLM proposal may combine
-research/search.py     select-on-train grid search, registry-aware
+research/search.py     select-on-train grid search, registry-aware, null-gated
+research/null.py       the coin-flip control every candidate is measured against
+research/replay.py     ReplayBroker: the real engine driven over cached bars
 research/registry.py   append-only trial log (committed: it is the honest denominator)
 research/metrics.py    deflated Sharpe
+research/robustness.py SimParams perturbation + daily regime check vs the null
 research/gate.py       burn-once out-of-sample verdict
 research/proposer.py   Claude proposes a spec (JSON, never code)
 

@@ -2,9 +2,10 @@
 
   python backtest.py                 # replay current params over history
   python backtest.py --days 180     # longer window
-  python backtest.py --tune         # grid search + walk-forward validation;
-                                    # writes tuned_params.json ONLY if all
-                                    # hard guidelines pass (see bot/tuner.py)
+  python backtest.py --tune         # grid search + a single chronological
+                                    # train/validation split; writes
+                                    # tuned_params.json ONLY if all hard
+                                    # guidelines pass (see bot/tuner.py)
 """
 
 import argparse
@@ -92,7 +93,7 @@ def main() -> int:
     if not args.tune:
         return 0
 
-    print("\nrunning guarded tune (grid + walk-forward validation)...")
+    print("\nrunning guarded tune (grid + one chronological train/val split)...")
     outcome = tune(bars, cfg)
     print(f"\ntune outcome: {'ACCEPTED' if outcome.accepted else 'REJECTED'} — {outcome.reason}")
     if outcome.best_val is not None:
