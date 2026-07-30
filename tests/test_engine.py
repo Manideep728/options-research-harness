@@ -141,6 +141,39 @@ def test_healthy_position_is_held(tmp_path):
     assert broker.closed == []
 
 
+def test_worthless_position_is_closed_not_stranded(tmp_path):
+    """A position priced at 0 has neither a live bid nor a broker mark, so the
+    contract is dead. The engine used to skip it ("no price; skipping exit
+    check"), which meant exit_reason never ran and the dead position held one
+    of the three max_positions slots until expiry. It must be abandoned."""
+    broker = FakeBroker({"SPY": flat_closes()}, positions=[spy_position(current=0.0)])
+    Engine(broker, cfg_for(tmp_path)).run_cycle()
+    assert broker.closed == ["SPY260716C00120000"]
+
+
+def test_worthless_position_does_not_permanently_block_new_entries(tmp_path):
+    """The consequence the previous test prevents: with the only slot held by a
+    dead contract, a fresh signal on another underlying could never enter.
+
+    (FakeBroker.get_chain returns one canned contract for any underlying, so
+    assert on the COUNT of buys, not the symbol.)"""
+    cfg = cfg_for(tmp_path, symbols=("SPY", "QQQ"), max_positions=1)
+    broker = FakeBroker(
+        {"SPY": flat_closes(), "QQQ": bounce_closes()},
+        positions=[spy_position(current=0.0)],
+    )
+    Engine(broker, cfg).run_cycle()
+    # Cycle 1: the dead contract still occupies the only slot, so nothing
+    # enters — but it is now being released.
+    assert broker.bought == []
+    assert broker.closed == ["SPY260716C00120000"]
+
+    # Cycle 2: with it gone, the QQQ signal can take the slot.
+    broker.positions = []
+    Engine(broker, cfg).run_cycle()
+    assert len(broker.bought) == 1
+
+
 def test_existing_position_blocks_reentry_same_underlying(tmp_path):
     broker = FakeBroker({"SPY": bounce_closes()}, positions=[spy_position()])
     Engine(broker, cfg_for(tmp_path)).run_cycle()
