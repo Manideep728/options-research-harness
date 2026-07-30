@@ -1,4 +1,4 @@
-"""Research loop CLI: python -m research <fetch|search|report|null|robustness|gate>
+"""Research loop CLI: python -m research <fetch|search|report|null|replay|robustness|gate>
 
 The intended cycle:
     fetch  -> cache bars (once, and again when the holdout must roll forward)
@@ -6,6 +6,7 @@ The intended cycle:
     report -> failure analysis of the winner's TRAIN trades (human reads this)
     propose -> Claude turns the report into the next spec (--offline: prompt only)
     null   -> what a coin flip earns on the same bars (the sanity check)
+    replay -> run the REAL engine over cached bars, with every risk cap active
     robustness -> SimParams perturbation + daily regime check vs the null
     gate   -> the burn-once holdout verdict (refuses a burned window)
 """
@@ -13,12 +14,14 @@ The intended cycle:
 import argparse
 import json
 import logging
+import statistics as stats_mod
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
 from bot.config import Settings
-from bot.simulator import SimParams, SimResult
+from bot.simulator import SimParams, SimResult, simulate
 from research import (
     data,
     failure_report,
@@ -26,6 +29,7 @@ from research import (
     null,
     proposer,
     registry,
+    replay,
     robustness,
     search,
 )
@@ -79,6 +83,16 @@ def main(argv: list[str] | None = None) -> int:
     p_propose.add_argument("--offline", action="store_true",
                            help="write the prompt to a file instead of calling the API")
     p_propose.add_argument("--report-file", type=Path, default=REPORT_PATH)
+    p_replay = sub.add_parser(
+        "replay", help="run the REAL engine over cached bars (all risk caps active)")
+    p_replay.add_argument("--window", choices=("train", "val"), default="val")
+    p_replay.add_argument("--work-dir", type=Path, default=None,
+                          help="where the engine writes state/journal/shortlist "
+                               "(default: a temp dir). NEVER point this at the repo "
+                               "root — it would overwrite the live bot's state.")
+    p_replay.add_argument("--compare", action="store_true",
+                          help="also run the unconstrained simulator for contrast")
+
     p_null = sub.add_parser(
         "null", help="coin-flip control on the same bars as the candidate")
     p_null.add_argument("--window", choices=("train", "val", "daily"), default="val")
@@ -141,6 +155,60 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nproposal: {result['name']} — {result['hypothesis']}")
         print(f"saved to {result['_path']}")
         print(f"next: python -m research search --spec {result['_path']}")
+        return 0
+
+    if args.command == "replay":
+        bars = {s: data.load_bars("intraday", s, args.data_dir) for s in cfg.symbols}
+        bars = {s: b for s, b in bars.items() if b[0]}
+        if not bars:
+            print("no cached bars — run `python -m research fetch`")
+            return 1
+        train_w, val_w = search.split_all(bars)
+        windows = train_w if args.window == "train" else val_w
+
+        # The engine writes state.json / trades.csv / active.json / control.json
+        # at the paths in cfg. Redirect them, or a replay would clobber the live
+        # bot's files.
+        work = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(
+            prefix="replay-"))
+        work.mkdir(parents=True, exist_ok=True)
+        run_cfg = replace(
+            cfg,
+            state_file=str(work / "state.json"),
+            journal_file=str(work / "trades.csv"),
+            control_file=str(work / "control.json"),
+            active_file=str(work / "active.json"),
+            earnings_file=str(work / "earnings.json"),
+        )
+        print(f"replaying the live engine over the {args.window} window "
+              f"({len(windows)} symbols); engine state in {work}")
+        replay_stats = replay.run_replay(windows, run_cfg)
+        returns = replay_stats.realized_returns
+        print(f"\ncycles={replay_stats.cycles} buys={replay_stats.buys} "
+              f"sells={replay_stats.sells} cancels={replay_stats.cancels}")
+        if not returns:
+            print("no completed round trips — the engine's caps may have blocked "
+                  "every entry, which is itself a result")
+            return 0
+        print(f"round trips={len(returns)} expectancy={stats_mod.fmean(returns):+.2%} "
+              f"win_rate={sum(1 for r in returns if r > 0) / len(returns):.1%}")
+
+        if args.compare:
+            sim: list[float] = []
+            for symbol, (closes, times) in windows.items():
+                sim += [t.pnl_pct for t in
+                        simulate(closes, times, cfg, SimParams(), symbol=symbol).trades]
+            if sim:
+                print("\nthe same bars, through the UNCONSTRAINED simulator:")
+                print(f"  simulate()   trades={len(sim):<5} "
+                      f"expectancy={stats_mod.fmean(sim):+.2%}")
+                print(f"  real engine  trades={len(returns):<5} "
+                      f"expectancy={stats_mod.fmean(returns):+.2%}")
+                print(f"\nThe engine took {len(returns) / len(sim):.1%} of the "
+                      "simulator's trades. Everything simulate() reports is about a "
+                      "system that trades far more often than the live bot: it has no "
+                      "max_positions, no max_trades_per_day, no cooldown, no "
+                      "shortlist, no session window and no liquidity gate.")
         return 0
 
     candidate = _require_candidate(args.candidate)

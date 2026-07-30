@@ -145,7 +145,7 @@ def simulate(
     Default (None) is the live EMA+RSI logic, unchanged."""
     result = SimResult()
     signals = signal_fn(closes) if signal_fn is not None else signal_series(closes, cfg)
-    gearing = sp.delta / sp.premium_pct_of_spot
+    gearing = gearing_of(sp)
 
     i = 0
     n = len(closes)
@@ -158,12 +158,12 @@ def simulate(
         entry_px, entry_t = closes[i], times[i]
         exit_reason = "end of data"
         exit_j = n - 1
-        pnl = _option_ret(closes[n - 1], entry_px, direction,
+        pnl = option_return(closes[n - 1], entry_px, direction,
                           (times[n - 1] - entry_t).total_seconds() / 86400, gearing, sp)
 
         for j in range(i + 1, n):
             days = (times[j] - entry_t).total_seconds() / 86400
-            ret = _option_ret(closes[j], entry_px, direction, days, gearing, sp)
+            ret = option_return(closes[j], entry_px, direction, days, gearing, sp)
             # A US session never straddles midnight UTC (09:30-16:00 ET is
             # 13:30-20:00 UTC), so a UTC date change between adjacent bars is
             # exactly "the engine was not running in between".
@@ -197,7 +197,15 @@ def simulate(
     return result
 
 
-def _option_ret(px, entry_px, direction, days, gearing, sp: SimParams) -> float:
+def gearing_of(sp: SimParams) -> float:
+    """Option return per 1.0 of underlying return. ~80x at the defaults."""
+    return sp.delta / sp.premium_pct_of_spot
+
+
+def option_return(px: float, entry_px: float, direction: float, days: float,
+                  gearing: float, sp: SimParams) -> float:
+    """The single P&L model. Public because research/replay.py reprices open
+    positions with it — one model with two callers, never two models."""
     move = direction * (px - entry_px) / entry_px
     ret = move * gearing - sp.theta_daily * days - sp.roundtrip_cost
     return max(ret, -1.0)
