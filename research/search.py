@@ -7,6 +7,11 @@ Discipline (inherited from bot/tuner.py and non-negotiable):
   - every candidate scored is logged to the append-only registry first,
   - the winner must beat the CURRENT live strategy on validation by the
     tuner's improvement margin,
+  - the winner must also beat a COIN FLIP on the same validation bars — see
+    research/null.py. Beating the incumbent is not the same as beating chance:
+    if the incumbent is itself no better than random, clearing it by 50% just
+    means being luckier. The null is recorded in the candidate's evidence
+    block, so no accepted candidate can be read without it,
   - exits are clamped through bot.config.clamp_tunables, signal params
     through the family's own bounds.
 
@@ -24,7 +29,7 @@ from pathlib import Path
 from bot.config import Settings, clamp_tunables
 from bot.simulator import SimParams, SimResult, simulate
 from bot.tuner import IMPROVE_ABS_MARGIN, IMPROVE_FACTOR, MIN_TRADES
-from research import data, metrics, registry
+from research import data, metrics, null, registry
 from research.families import EXIT_GRID, FAMILIES, Family, signal_candidates
 
 log = logging.getLogger("research.search")
@@ -45,6 +50,7 @@ class SearchOutcome:
     val: SimResult | None
     baseline_val: SimResult | None
     spec: dict | None = None   # set when the family came from a proposal spec
+    val_null: null.NullSummary | None = None
 
 
 def run_family(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
@@ -177,7 +183,12 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
     registry.log_trial(registry_path, family_name, {**best_sig, **best_exit},
                        "val", metrics.summarize([t.pnl_pct for t in val_res.trades]))
 
-    outcome = _judge(family_name, best_sig, best_exit, best_train, val_res, baseline_val)
+    # The coin-flip control on the same validation bars, sized to the winner's
+    # own trade count so the comparison is like-for-like.
+    val_null = null.null_distribution(val_w, replace(cfg, **best_exit), sp, val_res.n)
+
+    outcome = _judge(family_name, best_sig, best_exit, best_train, val_res,
+                     baseline_val, val_null)
     outcome.spec = spec
     if outcome.accepted:
         _write_candidate(candidate_path, outcome)
@@ -185,25 +196,34 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
 
 
 def _judge(family_name: str, sig: dict, exits: dict, train: SimResult,
-           val: SimResult, baseline_val: SimResult) -> SearchOutcome:
+           val: SimResult, baseline_val: SimResult,
+           val_null: null.NullSummary) -> SearchOutcome:
+    def reject(reason: str) -> SearchOutcome:
+        return SearchOutcome(False, reason, family_name, sig, exits, train, val,
+                             baseline_val, val_null=val_null)
+
     if val.n < MIN_TRADES:
-        return SearchOutcome(False, f"winner has too few validation trades ({val.n})",
-                             family_name, sig, exits, train, val, baseline_val)
+        return reject(f"winner has too few validation trades ({val.n})")
     if val.expectancy <= 0:
-        return SearchOutcome(False, "winner has non-positive validation expectancy",
-                             family_name, sig, exits, train, val, baseline_val)
+        return reject("winner has non-positive validation expectancy")
     if baseline_val.expectancy > 0:
         required = baseline_val.expectancy * IMPROVE_FACTOR
     else:
         required = baseline_val.expectancy + IMPROVE_ABS_MARGIN
     if val.expectancy < required:
-        return SearchOutcome(
-            False,
-            f"improvement too small (val {val.expectancy:.3f} < required {required:.3f})",
-            family_name, sig, exits, train, val, baseline_val,
+        return reject(
+            f"improvement too small (val {val.expectancy:.3f} < required {required:.3f})"
+        )
+    # Last and strictest: beat chance, not just the incumbent.
+    if not val_null.beats(val.expectancy):
+        return reject(
+            f"does not beat the coin-flip null (val {val.expectancy:.3f} vs "
+            f"null p{int(null.NULL_QUANTILE * 100)} {val_null.threshold:.3f} "
+            f"over {val_null.seeds} seeds)"
         )
     return SearchOutcome(True, "passed all search guidelines",
-                         family_name, sig, exits, train, val, baseline_val)
+                         family_name, sig, exits, train, val, baseline_val,
+                         val_null=val_null)
 
 
 def _write_candidate(path: Path, o: SearchOutcome) -> None:
@@ -223,6 +243,14 @@ def _write_candidate(path: Path, o: SearchOutcome) -> None:
             "val_expectancy": round(o.val.expectancy, 4),
             "val_win_rate": round(o.val.win_rate, 4),
             "baseline_val_expectancy": round(o.baseline_val.expectancy, 4),
+            # The coin-flip control travels with the claim. An expectancy
+            # without its null is not evidence, it is a number.
+            "val_null_seeds": o.val_null.seeds if o.val_null else 0,
+            "val_null_mean": round(o.val_null.mean, 4) if o.val_null else None,
+            "val_null_threshold": round(o.val_null.threshold, 4) if o.val_null else None,
+            "val_null_percentile": (
+                round(o.val_null.percentile_of(o.val.expectancy), 4) if o.val_null else None
+            ),
         },
         "created_at": datetime.now(UTC).isoformat(),
     }
