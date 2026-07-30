@@ -6,6 +6,14 @@ statistical claim the research loop makes (the deflated Sharpe ratio is
 forgotten, N shrinks and every result looks better than it is. So: one
 JSONL file, append-only, and holdout-gate attempts are recorded here too —
 that record is what makes the gate burn-once.
+
+A trial's identity includes the DATASET it was scored on, not just the window
+name. It used to be keyed on the literal string "train", which meant a score
+survived `python -m research fetch` moving the train/val boundaries — so the
+searcher would reuse a number computed on different bars and never notice. The
+gate always got this right (it keys on the holdout's date range); trials did
+not. `dataset` is omitted from the hash when empty so rows written before this
+existed keep their keys and stay countable in N.
 """
 
 import hashlib
@@ -15,11 +23,28 @@ from pathlib import Path
 
 DEFAULT_PATH = Path(__file__).resolve().parent / "trials.jsonl"
 
+Windows = dict[str, tuple[list[float], list]]
 
-def _key(family: str, params: dict, window: str) -> str:
-    canonical = json.dumps({"family": family, "params": params, "window": window},
-                           sort_keys=True)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+def window_id(windows: Windows) -> str:
+    """Calendar identity of a dataset: earliest..latest bar date across all
+    symbols. Two windows with the same name but different dates are different
+    datasets, and a score from one says nothing about the other."""
+    starts = [times[0] for _, times in windows.values() if times]
+    ends = [times[-1] for _, times in windows.values() if times]
+    if not starts:
+        return "empty"
+    return f"{min(starts).date().isoformat()}..{max(ends).date().isoformat()}"
+
+
+def _key(family: str, params: dict, window: str, dataset: str = "") -> str:
+    payload: dict = {"family": family, "params": params, "window": window}
+    if dataset:
+        # Conditional so pre-dataset rows hash identically to how they were
+        # written. Their keys stay valid; they simply can never collide with a
+        # dataset-qualified key, which is precisely the stale-reuse fix.
+        payload["dataset"] = dataset
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _append(path: Path, entry: dict) -> None:
@@ -46,14 +71,27 @@ def entries(path: Path = DEFAULT_PATH) -> list[dict]:
 
 
 def log_trial(path: Path, family: str, params: dict, window: str,
-              scores: dict) -> None:
+              scores: dict, dataset: str = "") -> None:
     _append(Path(path), {
         "kind": "trial",
-        "key": _key(family, params, window),
+        "key": _key(family, params, window, dataset),
         "family": family,
         "params": params,
         "window": window,
+        "dataset": dataset,
         "scores": scores,
+        "at": datetime.now(UTC).isoformat(),
+    })
+
+
+def log_dataset_change(path: Path, reason: str, dataset: str = "") -> None:
+    """Record that prior scores are no longer comparable. Nothing is deleted —
+    a reader that finds this row knows to distrust trials logged before it,
+    while N keeps counting every attempt that genuinely happened."""
+    _append(Path(path), {
+        "kind": "dataset_change",
+        "reason": reason,
+        "dataset": dataset,
         "at": datetime.now(UTC).isoformat(),
     })
 
@@ -95,10 +133,10 @@ def trial_scores(path: Path = DEFAULT_PATH) -> dict[str, dict]:
     return out
 
 
-def trial_key(family: str, params: dict, window: str) -> str:
+def trial_key(family: str, params: dict, window: str, dataset: str = "") -> str:
     """Public accessor for the identity hash, so callers key into
     trial_scores() with exactly the same hash log_trial() will write."""
-    return _key(family, params, window)
+    return _key(family, params, window, dataset)
 
 
 def trial_sharpes(path: Path = DEFAULT_PATH) -> list[float]:

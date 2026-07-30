@@ -50,7 +50,7 @@ def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
     if not holdout:
         return GateOutcome(False, False, "no holdout data cached", "", None, None)
 
-    window_id = _window_id(holdout)
+    window_id = registry.window_id(holdout)
     if registry.gate_burned(registry_path, window_id):
         return GateOutcome(
             True, False,
@@ -84,9 +84,3 @@ def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
     log.info("gate %s: %s (window %s now burned)",
              "PASSED" if passed else "FAILED", reason, window_id)
     return GateOutcome(False, passed, reason, window_id, result, dsr)
-
-
-def _window_id(holdout: dict) -> str:
-    starts = [times[0] for _, times in holdout.values()]
-    ends = [times[-1] for _, times in holdout.values()]
-    return f"{min(starts).date().isoformat()}..{max(ends).date().isoformat()}"

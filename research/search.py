@@ -127,6 +127,11 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
         return SearchOutcome(False, "no cached bars — run `python -m research fetch`",
                              family_name, {}, {}, None, None, None)
     train_w, val_w = split_all(bars)
+    # Identity of the exact bars being scored. Without this in the key, a score
+    # survives `fetch` moving the split boundaries and gets reused on different
+    # data — see research/registry.py.
+    train_id = registry.window_id(train_w)
+    val_id = registry.window_id(val_w)
 
     # Registry-aware skip: a candidate already scored on this train window is
     # not re-simulated (wasted work) nor re-logged (a duplicate row would not
@@ -141,7 +146,7 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
     reused = 0
     for sig_params, exit_params in candidates:
         params = {**sig_params, **exit_params}
-        key = registry.trial_key(family_name, params, "train")
+        key = registry.trial_key(family_name, params, "train", train_id)
         cached = prior_scores.get(key)
         if cached is not None:
             reused += 1
@@ -153,6 +158,7 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
             registry.log_trial(
                 registry_path, family_name, params,
                 "train", metrics.summarize([t.pnl_pct for t in train_res.trades]),
+                dataset=train_id,
             )
             n, expectancy = train_res.n, train_res.expectancy
 
@@ -181,7 +187,8 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
     for symbol, (closes, times) in val_w.items():
         baseline_val.trades.extend(simulate(closes, times, cfg, sp, symbol=symbol).trades)
     registry.log_trial(registry_path, family_name, {**best_sig, **best_exit},
-                       "val", metrics.summarize([t.pnl_pct for t in val_res.trades]))
+                       "val", metrics.summarize([t.pnl_pct for t in val_res.trades]),
+                       dataset=val_id)
 
     # The coin-flip control on the same validation bars, sized to the winner's
     # own trade count so the comparison is like-for-like.
