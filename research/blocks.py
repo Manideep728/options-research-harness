@@ -21,6 +21,7 @@ Spec shape:
 """
 
 import itertools
+import math
 import statistics
 from datetime import datetime
 from typing import Any
@@ -63,6 +64,38 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
 
 MAX_CANDIDATES = 500  # signal-grid cap, before the shared exit grid
 VOL_LOOKBACK = 14     # bars of returns for the entry-vol filters
+
+# Params measured PER BAR, so their meaning depends on the bar size. A 0.002
+# return-stdev threshold calibrated on 15-min bars is a completely different
+# filter on daily bars, and any check that crosses timeframes must rescale
+# them or it is measuring nothing.
+BAR_RELATIVE_PARAMS = ("max_entry_vol", "min_entry_vol")
+# Params with no daily-bar equivalent at all. Alpaca stamps daily bars at
+# 00:00 ET, so an entry-hour filter matches either every bar or none of them
+# regardless of what the strategy intended.
+INTRADAY_ONLY_PARAMS = ("entry_hours",)
+
+
+def rescale_to_daily(params: dict, bars_per_day: float) -> dict:
+    """Convert per-bar params from the intraday timeframe to daily bars.
+
+    Return stdev of a random walk scales with the square root of the
+    aggregation period, so a 0.002 per-15-min-bar threshold is roughly
+    0.002 * sqrt(26) ~= 0.010 on daily bars.
+
+    Deliberately NOT clamped to PARAM_BOUNDS: those bounds describe the
+    intraday scale, and the rescaled value is a derived quantity used for one
+    cross-timeframe check. It is never a candidate parameter and is never
+    written to the registry, a candidate, or tuned_params.json.
+    """
+    if bars_per_day <= 1:
+        return dict(params)
+    factor = math.sqrt(bars_per_day)
+    out = dict(params)
+    for key in BAR_RELATIVE_PARAMS:
+        if key in out:
+            out[key] = float(out[key]) * factor
+    return out
 
 
 # --- validation ---

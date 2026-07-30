@@ -6,13 +6,17 @@ That turned volatility into expectancy, and robustness.daily_regime_check —
 which passed a fold on `expectancy > 0` — could not fail a random signal.
 """
 
+import random
+import statistics
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from bot.config import Settings
 from bot.simulator import SimParams
 from bot.strategy import Action
-from research import null, robustness
-from research.families import FAMILIES
+from research import blocks, null, robustness
+from research.families import FAMILIES, Family
 from research.search import run_family
 
 CFG = Settings(api_key="", secret_key="")
@@ -122,7 +126,7 @@ def test_regime_guard_rejects_a_coin_flip(tmp_path):
         target.write_text("\n".join(rows) + "\n")
 
     cfg = Settings(api_key="", secret_key="", symbols=("SPY", "QQQ"))
-    passed, rows_out = robustness.daily_regime_check(
+    passed, rows_out, _note = robustness.daily_regime_check(
         cfg, null.null_family(4242, 0.15), {}, data_dir=tmp_path, null_seeds=25,
     )
     assert not passed
@@ -143,7 +147,7 @@ def test_regime_guard_reports_the_null_bar_it_used(tmp_path):
     target.write_text("\n".join(rows) + "\n")
 
     cfg = Settings(api_key="", secret_key="", symbols=("SPY",))
-    _, rows_out = robustness.daily_regime_check(
+    _, rows_out, _note = robustness.daily_regime_check(
         cfg, FAMILIES["donchian"], {"lookback": 20}, data_dir=tmp_path, null_seeds=15,
     )
     countable = [r for r in rows_out if r.trades >= robustness.MIN_FOLD_TRADES]
@@ -151,6 +155,83 @@ def test_regime_guard_reports_the_null_bar_it_used(tmp_path):
     for row in countable:
         assert row.null_threshold is not None
         assert row.null_trades is not None
+
+
+def test_daily_return_stdev_scales_as_sqrt_of_bars_per_day():
+    """The scaling law rescale_to_daily depends on. Aggregating a 15-min series
+    into daily bars multiplies per-bar return stdev by ~sqrt(26), which is why
+    an intraday-calibrated volatility threshold has to be multiplied by the same
+    factor before it means anything on daily bars. Linear scaling would be off
+    by 5x and this test would catch it."""
+    rng = random.Random(7)
+    per_day = int(robustness.bars_per_day(CFG))          # 390 / 15 = 26
+    intraday = [100.0]
+    for _ in range(per_day * 500):
+        intraday.append(intraday[-1] * (1 + rng.gauss(0, 0.001)))
+    daily = intraday[::per_day]
+
+    def stdev_of_returns(series: list[float]) -> float:
+        return statistics.pstdev([(series[i] - series[i - 1]) / series[i - 1]
+                                  for i in range(1, len(series))])
+
+    ratio = stdev_of_returns(daily) / stdev_of_returns(intraday)
+    assert 0.85 * per_day ** 0.5 < ratio < 1.15 * per_day ** 0.5
+
+
+def test_regime_guard_actually_runs_with_the_rescaled_params(tmp_path):
+    """Reporting the rescale in the note is not enough — the check has to hand
+    the rescaled value to the simulator. A spy family records what it received,
+    which pins the behaviour without depending on a price fixture that happens
+    to fire."""
+    day = datetime(2021, 1, 4, 5, 0, tzinfo=UTC)
+    rows = ["timestamp,close"]
+    for i in range(600):
+        rows.append(f"{(day + timedelta(days=i)).isoformat()},{100.0 + i * 0.1:.6f}")
+    target = tmp_path / "daily" / "SPY.csv"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(rows) + "\n")
+
+    seen: list[dict] = []
+
+    def spy(closes, times, params):
+        seen.append(dict(params))
+        return [Action.NONE] * len(closes)
+
+    family = Family(name="spy", description="records its params", signal=spy,
+                    grid={}, bounds={})
+    cfg = Settings(api_key="", secret_key="", symbols=("SPY",))
+    _, _rows, note = robustness.daily_regime_check(
+        cfg, family, {"max_entry_vol": 0.002, "ema_fast": 8},
+        data_dir=tmp_path, null_seeds=1,
+    )
+    assert seen, "the spy family was never called"
+    expected = 0.002 * robustness.bars_per_day(cfg) ** 0.5
+    assert all(p["max_entry_vol"] == pytest.approx(expected) for p in seen)
+    assert all(p["ema_fast"] == 8 for p in seen), "bar COUNTS must not be rescaled"
+    assert "rescaled" in note and "max_entry_vol" in note
+
+
+def test_regime_guard_reports_not_evaluable_rather_than_failing(tmp_path):
+    """entry_hours has no daily equivalent — Alpaca stamps daily bars at 00:00
+    ET. Reporting that as a plain FAIL reads as evidence against the candidate
+    when it is really "this check cannot judge it"."""
+    cfg = Settings(api_key="", secret_key="", symbols=("SPY",))
+    passed, rows_out, note = robustness.daily_regime_check(
+        cfg, FAMILIES["donchian"], {"lookback": 20, "entry_hours": [14, 15]},
+        data_dir=tmp_path, null_seeds=5,
+    )
+    assert not passed                      # still not a pass
+    assert "NOT EVALUABLE" in note         # but distinguishable from a real fail
+    assert "entry_hours" in note
+    assert rows_out == []
+
+
+def test_rescale_to_daily_uses_sqrt_of_time():
+    scaled = blocks.rescale_to_daily({"max_entry_vol": 0.002, "ema_fast": 8}, 26)
+    assert scaled["max_entry_vol"] == pytest.approx(0.002 * 26 ** 0.5)
+    assert scaled["ema_fast"] == 8          # bar COUNTS are not rescaled
+    # Same timeframe means no change at all.
+    assert blocks.rescale_to_daily({"max_entry_vol": 0.002}, 1) == {"max_entry_vol": 0.002}
 
 
 def test_null_runs_through_the_same_engine_as_a_real_family():
