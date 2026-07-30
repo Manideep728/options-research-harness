@@ -21,6 +21,13 @@ def times_for(closes, minutes=15):
     return [T0 + timedelta(minutes=minutes * i) for i in range(len(closes))]
 
 
+def times_with_overnight_gap(closes, minutes=15):
+    """Bars `minutes` apart except the LAST one, which lands a day later — so
+    the final step is a session gap the engine cannot trade through."""
+    earlier = times_for(closes[:-1], minutes)
+    return [*earlier, earlier[-1] + timedelta(days=1)]
+
+
 def test_signal_series_agrees_with_live_evaluate():
     """The fast per-bar series must match strategy.evaluate at every prefix —
     this is what makes backtest results transferable to the live bot."""
@@ -38,7 +45,8 @@ def test_take_profit_path():
     result = simulate(closes, times_for(closes), CFG, SP)
     assert result.n == 1
     assert result.trades[0].reason == "take profit"
-    assert result.trades[0].pnl_pct >= CFG.take_profit_pct
+    # Intra-session: booked AT the barrier, not at the bar's overshoot.
+    assert result.trades[0].pnl_pct == CFG.take_profit_pct
 
 
 def test_stop_loss_path():
@@ -48,7 +56,33 @@ def test_stop_loss_path():
     result = simulate(closes, times_for(closes), CFG, SP)
     assert result.n == 1
     assert result.trades[0].reason == "stop loss"
-    assert result.trades[0].pnl_pct <= -CFG.stop_loss_pct
+    assert result.trades[0].pnl_pct == -CFG.stop_loss_pct
+
+
+def test_intra_session_barrier_ignores_overshoot_size():
+    """The regression test for the phantom-edge bug: at 80x gearing a stop is
+    tripped by a -0.31% move, so the size of the overshoot past it is a
+    property of the bar, not the strategy. Two very different overshoots must
+    book the same loss. Booking the overshoot instead scored these as -0.51
+    and -1.0, and because gains had no matching cap, a coin flip made money."""
+    booked = []
+    for final_move in (0.994, 0.98):
+        closes = bounce_closes()
+        closes += [closes[-1] * 0.998, closes[-1] * final_move]
+        result = simulate(closes, times_for(closes), CFG, SP)
+        assert result.trades[0].reason == "stop loss"
+        booked.append(result.trades[0].pnl_pct)
+    assert booked == [-CFG.stop_loss_pct, -CFG.stop_loss_pct]
+
+
+def test_overnight_gap_books_the_full_move_not_the_barrier():
+    """Across a session gap the engine is not polling and cannot exit at the
+    barrier, so the gap's real damage is booked."""
+    closes = bounce_closes()
+    closes += [closes[-1] * 0.994]
+    result = simulate(closes, times_with_overnight_gap(closes), CFG, SP)
+    assert result.trades[0].reason == "stop loss"
+    assert result.trades[0].pnl_pct < -CFG.stop_loss_pct
 
 
 def test_max_hold_path_and_theta_drain():
@@ -69,10 +103,10 @@ def test_max_hold_path_and_theta_drain():
 
 
 def test_loss_capped_at_full_premium():
+    # Catastrophic overnight gap: a long option cannot lose more than premium.
     closes = bounce_closes()
-    entry_px = closes[-1]
-    closes += [entry_px * 0.90]  # catastrophic gap against the position
-    result = simulate(closes, times_for(closes), CFG, SP)
+    closes += [closes[-1] * 0.90]
+    result = simulate(closes, times_with_overnight_gap(closes), CFG, SP)
     assert result.trades[0].pnl_pct == -1.0
 
 

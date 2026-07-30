@@ -7,6 +7,25 @@ Option model (crude but directionally honest):
                   - roundtrip_cost                         (spread + slippage)
 capped below at -100% (long options cannot lose more than the premium).
 Constants live in SimParams so the approximation is visible and testable.
+
+Exit accounting — read this before trusting any number out of here. The
+gearing is delta/premium_pct = 80x, so take_profit_pct=0.50 is reached by a
++0.625% move in the underlying and stop_loss_pct=0.25 by -0.31%. Bars are
+much bigger than that, so a bar that trips a barrier has almost always blown
+straight past it, and the size of that overshoot is a property of the bar
+size, not of the strategy. Booking the overshoot is therefore wrong twice
+over: it is arbitrary, and because losses are floored at -100% while gains
+are unbounded, it manufactures positive expectancy out of pure volatility (a
+coin-flip signal on daily bars scored +11% per trade before this was fixed).
+
+So: a barrier tripped WITHIN a session books the barrier level, because the
+live engine polls the option every loop_interval_sec (30s) and really does
+exit at approximately the barrier. A barrier tripped ACROSS a session gap
+books the full move, because the engine is not running and cannot act.
+
+Consequence worth stating plainly: on DAILY bars every step is a session gap,
+so nothing here is fixed for them — the linear-delta model is simply not
+valid for moves that large, and research/null.py exists to keep proving it.
 """
 
 from dataclasses import dataclass, field
@@ -19,6 +38,22 @@ from bot.strategy import Action
 
 @dataclass(frozen=True)
 class SimParams:
+    """The whole option-pricing approximation, in four numbers.
+
+    Known limitations, none of them hidden:
+      - delta is constant, so there is no gamma and no convexity. A first-OTM
+        contract also has to travel to its strike before it gains intrinsic
+        value, which this model does not charge for — so large favourable
+        moves are priced too generously.
+      - theta is flat per calendar day regardless of DTE, which is wrong for
+        the 7-14 DTE window the live bot actually trades.
+      - roundtrip_cost=0.03 is optimistic against the live liquidity gate:
+        max_spread_pct_of_mid=0.10 permits paying ~mid+1% on entry and selling
+        at the bid on exit, i.e. ~6% roundtrip in the worst permitted case.
+      - close-only bars mean intra-bar path is unknown; see the module
+        docstring for how barrier exits are booked and why.
+    """
+
     delta: float = 0.40              # first-OTM 7-14 DTE contract, roughly
     premium_pct_of_spot: float = 0.005
     theta_daily: float = 0.05        # premium decay per calendar day held
@@ -129,11 +164,17 @@ def simulate(
         for j in range(i + 1, n):
             days = (times[j] - entry_t).total_seconds() / 86400
             ret = _option_ret(closes[j], entry_px, direction, days, gearing, sp)
+            # A US session never straddles midnight UTC (09:30-16:00 ET is
+            # 13:30-20:00 UTC), so a UTC date change between adjacent bars is
+            # exactly "the engine was not running in between".
+            gapped = times[j].date() != times[j - 1].date()
             if ret >= cfg.take_profit_pct:
-                exit_reason, exit_j, pnl = "take profit", j, ret
+                exit_reason, exit_j = "take profit", j
+                pnl = ret if gapped else cfg.take_profit_pct
                 break
             if ret <= -cfg.stop_loss_pct:
-                exit_reason, exit_j, pnl = "stop loss", j, ret
+                exit_reason, exit_j = "stop loss", j
+                pnl = ret if gapped else -cfg.stop_loss_pct
                 break
             if days >= cfg.max_hold_days:
                 exit_reason, exit_j, pnl = "max hold", j, ret
