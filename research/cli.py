@@ -191,10 +191,15 @@ def main(argv: list[str] | None = None) -> int:
         beats = summary.beats(candidate_result.expectancy)
         print(f"  candidate percentile {summary.percentile_of(candidate_result.expectancy):.1%}"
               f"  -> {'BEATS' if beats else 'DOES NOT BEAT'} the null")
-        if abs(summary.mean) > 0.02:
-            print("\nWARNING: a coin flip should score about zero minus costs. It does not "
-                  "here, which means the P&L model is not valid on these bars — treat every "
-                  "number computed on them as unusable, not merely optimistic.")
+        # A negative null mean is expected and healthy: it is the roundtrip
+        # cost plus theta, which is exactly what a signal-free strategy pays.
+        # A POSITIVE null mean is the pathology — it means the P&L model hands
+        # out money for taking risk, with no forecast involved.
+        if summary.mean > 0.02:
+            print(f"\nWARNING: a coin flip EARNS {summary.mean:+.2%} per trade here. A "
+                  "signal-free strategy should pay the spread, not collect it, so the P&L "
+                  "model is not valid on these bars — treat every number computed on them "
+                  "as unusable, not merely optimistic.")
         return 0 if beats else 1
 
     if args.command == "robustness":
