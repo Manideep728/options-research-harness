@@ -17,6 +17,15 @@
    its OWN null distribution's 95th percentile, measured on the same bars with
    the same P&L model, so a bar-resolution artifact lifts the bar it has to
    clear instead of handing out a free pass.
+
+   Crossing from 15-minute to daily bars also changes what per-bar parameters
+   MEAN. An entry-volatility threshold of 0.002 is "calm" for a 15-min bar and
+   unreachable for a daily one — the pending `calm-uptrend-calls` spec matched
+   zero daily bars across all six year folds, so the check reported FAIL for a
+   unit mismatch rather than an economic reason, and no spec using that filter
+   could ever have passed. Bar-relative params are now rescaled (see
+   blocks.rescale_to_daily) and params with no daily equivalent at all are
+   reported as NOT EVALUABLE, which is distinct from failing.
 """
 
 import itertools
@@ -27,7 +36,7 @@ from pathlib import Path
 
 from bot.config import Settings
 from bot.simulator import SimParams
-from research import data, null
+from research import blocks, data, null
 from research.families import Family
 from research.search import run_family
 
@@ -37,6 +46,12 @@ MIN_FOLDS = 2          # and we need at least this many countable folds
 # Seeds per fold. Fewer than research.null.DEFAULT_SEEDS because the regime
 # check runs one null per year fold; 100 still resolves a 95th percentile.
 REGIME_NULL_SEEDS = 100
+# Regular US session length, for converting intraday bars/day.
+SESSION_MINUTES = 390  # 09:30-16:00 ET
+
+
+def bars_per_day(cfg: Settings) -> float:
+    return SESSION_MINUTES / max(1, cfg.bar_timeframe_minutes)
 
 
 @dataclass
@@ -47,18 +62,6 @@ class PerturbationRow:
     # Populated for regime folds only: the null bar this fold had to clear.
     null_threshold: float | None = field(default=None)
     null_trades: float | None = field(default=None)
-
-
-@dataclass
-class RobustnessOutcome:
-    perturbation_passed: bool
-    perturbation_rows: list[PerturbationRow]
-    regime_passed: bool
-    regime_rows: list[PerturbationRow]   # label = year
-
-    @property
-    def passed(self) -> bool:
-        return self.perturbation_passed and self.regime_passed
 
 
 def perturbation_grid(base: SimParams) -> list[tuple[str, SimParams]]:
@@ -94,9 +97,31 @@ def daily_regime_check(cfg: Settings, family: Family, signal_params: dict,
                        sp: SimParams = SimParams(),
                        data_dir: Path = data.DATA_DIR,
                        null_seeds: int = REGIME_NULL_SEEDS
-                       ) -> tuple[bool, list[PerturbationRow]]:
+                       ) -> tuple[bool, list[PerturbationRow], str]:
     """Every countable year fold must beat its own coin-flip null. Folds with
-    too few trades are reported but don't count either way."""
+    too few trades are reported but don't count either way.
+
+    Returns (passed, rows, note). `note` is non-empty when the check could not
+    be run as specified — either because a param has no daily equivalent, or to
+    record that bar-relative params were rescaled.
+    """
+    blocked = [p for p in blocks.INTRADAY_ONLY_PARAMS if p in signal_params]
+    if blocked:
+        return False, [], (
+            f"NOT EVALUABLE on daily bars: {', '.join(blocked)} is defined in "
+            "intraday terms and has no daily equivalent. This is not evidence "
+            "against the candidate — it means this check cannot judge it."
+        )
+
+    daily_params = blocks.rescale_to_daily(signal_params, bars_per_day(cfg))
+    rescaled = {k: (signal_params[k], daily_params[k])
+                for k in blocks.BAR_RELATIVE_PARAMS if k in signal_params}
+    note = ""
+    if rescaled:
+        note = "rescaled per-bar params for daily bars: " + ", ".join(
+            f"{k} {before:g} -> {after:.4g}" for k, (before, after) in rescaled.items()
+        )
+
     by_year: dict[int, dict] = {}
     for symbol in cfg.symbols:
         closes, times = data.load_bars("daily", symbol, data_dir)
@@ -107,7 +132,7 @@ def daily_regime_check(cfg: Settings, family: Family, signal_params: dict,
     evaluable = 0
     passed = True
     for year in sorted(by_year):
-        result = run_family(by_year[year], cfg, sp, family, signal_params)
+        result = run_family(by_year[year], cfg, sp, family, daily_params)
         if result.n < MIN_FOLD_TRADES:
             rows.append(PerturbationRow(str(year), result.n, result.expectancy))
             continue
@@ -121,8 +146,10 @@ def daily_regime_check(cfg: Settings, family: Family, signal_params: dict,
         if not summary.beats(result.expectancy):
             passed = False
     if evaluable < MIN_FOLDS:
-        return False, rows  # not enough evidence is a fail, not a free pass
-    return passed, rows
+        return False, rows, (note + ("; " if note else "")
+                             + f"only {evaluable} fold(s) had >= {MIN_FOLD_TRADES} "
+                               f"trades; {MIN_FOLDS} are required")
+    return passed, rows, note
 
 
 def _group_by_year(closes: list[float],

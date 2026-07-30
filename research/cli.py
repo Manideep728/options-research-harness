@@ -278,9 +278,11 @@ def main(argv: list[str] | None = None) -> int:
         print("perturbation grid (validation window):")
         for row in p_rows:
             print(f"  {row.label:<32} n={row.trades:<4} expectancy={row.expectancy:+.2%}")
-        r_ok, r_rows = robustness.daily_regime_check(run_cfg, family, sig,
-                                                     data_dir=args.data_dir)
+        r_ok, r_rows, r_note = robustness.daily_regime_check(run_cfg, family, sig,
+                                                            data_dir=args.data_dir)
         print("daily regime folds (each must beat its own coin-flip null):")
+        if r_note:
+            print(f"  note: {r_note}")
         for row in r_rows:
             bar = ("not countable" if row.null_threshold is None
                    else f"null p95={row.null_threshold:+.2%} (null n={row.null_trades:.0f})")

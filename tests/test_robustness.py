@@ -49,7 +49,7 @@ def test_daily_regime_check_requires_enough_folds(tmp_path):
     closes, times = _sawtooth_bars(30, step_minutes=60 * 24)
     data.save_bars(tmp_path / "daily" / "AAA.csv", closes, times)
     cfg = _cfg(symbols=("AAA",))
-    passed, _rows = robustness.daily_regime_check(
+    passed, _rows, _note = robustness.daily_regime_check(
         cfg, FAMILIES["rsi_only"],
         {"rsi_bull_level": 40.0, "rsi_bear_level": 60.0}, data_dir=tmp_path)
     assert not passed
@@ -59,7 +59,7 @@ def test_daily_regime_check_groups_by_year(tmp_path):
     closes, times = _sawtooth_bars(700, start_year=2024, step_minutes=60 * 24)
     data.save_bars(tmp_path / "daily" / "AAA.csv", closes, times)
     cfg = _cfg(symbols=("AAA",))
-    _, rows = robustness.daily_regime_check(
+    _, rows, _note = robustness.daily_regime_check(
         cfg, FAMILIES["rsi_only"],
         {"rsi_bull_level": 40.0, "rsi_bear_level": 60.0}, data_dir=tmp_path)
     years = [r.label for r in rows]
