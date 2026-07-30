@@ -8,26 +8,35 @@
 
 2. Daily-bar regime check: one year of 15-min bars is one market regime.
    Running the winner's signal on multi-year DAILY bars (a coarse proxy for
-   the strategy, so we only ask for the SIGN of expectancy, not magnitude)
+   the strategy, so we only ask whether it beats chance, not by how much)
    checks the idea isn't an artifact of one regime. The daily cache was cut
    before the holdout window at fetch time, so this peeks at nothing.
+
+   This check used to pass a fold on `expectancy > 0`, which a coin flip
+   cleared at +11.1% per trade — see research/null.py. A fold now has to beat
+   its OWN null distribution's 95th percentile, measured on the same bars with
+   the same P&L model, so a bar-resolution artifact lifts the bar it has to
+   clear instead of handing out a free pass.
 """
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import datetime
 from pathlib import Path
 
 from bot.config import Settings
 from bot.simulator import SimParams
-from research import data
+from research import data, null
 from research.families import Family
 from research.search import run_family
 
 _FACTORS = (0.5, 1.0, 1.5)
 MIN_FOLD_TRADES = 10   # a yearly fold needs this many trades to count
 MIN_FOLDS = 2          # and we need at least this many countable folds
+# Seeds per fold. Fewer than research.null.DEFAULT_SEEDS because the regime
+# check runs one null per year fold; 100 still resolves a 95th percentile.
+REGIME_NULL_SEEDS = 100
 
 
 @dataclass
@@ -35,6 +44,9 @@ class PerturbationRow:
     label: str
     trades: int
     expectancy: float
+    # Populated for regime folds only: the null bar this fold had to clear.
+    null_threshold: float | None = field(default=None)
+    null_trades: float | None = field(default=None)
 
 
 @dataclass
@@ -80,9 +92,11 @@ def check_perturbations(windows: dict, cfg: Settings, family: Family,
 
 def daily_regime_check(cfg: Settings, family: Family, signal_params: dict,
                        sp: SimParams = SimParams(),
-                       data_dir: Path = data.DATA_DIR) -> tuple[bool, list[PerturbationRow]]:
-    """Sign-consistency across year folds of the daily cache. Folds with too
-    few trades are reported but don't count either way."""
+                       data_dir: Path = data.DATA_DIR,
+                       null_seeds: int = REGIME_NULL_SEEDS
+                       ) -> tuple[bool, list[PerturbationRow]]:
+    """Every countable year fold must beat its own coin-flip null. Folds with
+    too few trades are reported but don't count either way."""
     by_year: dict[int, dict] = {}
     for symbol in cfg.symbols:
         closes, times = data.load_bars("daily", symbol, data_dir)
@@ -94,11 +108,18 @@ def daily_regime_check(cfg: Settings, family: Family, signal_params: dict,
     passed = True
     for year in sorted(by_year):
         result = run_family(by_year[year], cfg, sp, family, signal_params)
-        rows.append(PerturbationRow(str(year), result.n, result.expectancy))
-        if result.n >= MIN_FOLD_TRADES:
-            evaluable += 1
-            if result.expectancy <= 0:
-                passed = False
+        if result.n < MIN_FOLD_TRADES:
+            rows.append(PerturbationRow(str(year), result.n, result.expectancy))
+            continue
+        # Size the null to this fold's trade count so the comparison is
+        # like-for-like on sample size, not just on mean.
+        summary = null.null_distribution(by_year[year], cfg, sp, result.n, seeds=null_seeds)
+        rows.append(PerturbationRow(str(year), result.n, result.expectancy,
+                                    null_threshold=summary.threshold,
+                                    null_trades=summary.mean_trades))
+        evaluable += 1
+        if not summary.beats(result.expectancy):
+            passed = False
     if evaluable < MIN_FOLDS:
         return False, rows  # not enough evidence is a fail, not a free pass
     return passed, rows

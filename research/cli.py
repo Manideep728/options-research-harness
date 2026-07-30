@@ -1,11 +1,12 @@
-"""Research loop CLI: python -m research <fetch|search|report|propose|robustness|gate>
+"""Research loop CLI: python -m research <fetch|search|report|null|robustness|gate>
 
 The intended cycle:
     fetch  -> cache bars (once, and again when the holdout must roll forward)
     search -> select-on-train winner for one family or spec, judged on validation
     report -> failure analysis of the winner's TRAIN trades (human reads this)
     propose -> Claude turns the report into the next spec (--offline: prompt only)
-    robustness -> SimParams perturbation + daily regime sign-check
+    null   -> what a coin flip earns on the same bars (the sanity check)
+    robustness -> SimParams perturbation + daily regime check vs the null
     gate   -> the burn-once holdout verdict (refuses a burned window)
 """
 
@@ -18,7 +19,16 @@ from pathlib import Path
 
 from bot.config import Settings
 from bot.simulator import SimParams, SimResult
-from research import data, failure_report, gate, proposer, registry, robustness, search
+from research import (
+    data,
+    failure_report,
+    gate,
+    null,
+    proposer,
+    registry,
+    robustness,
+    search,
+)
 from research.families import FAMILIES
 
 log = logging.getLogger("research")
@@ -69,6 +79,14 @@ def main(argv: list[str] | None = None) -> int:
     p_propose.add_argument("--offline", action="store_true",
                            help="write the prompt to a file instead of calling the API")
     p_propose.add_argument("--report-file", type=Path, default=REPORT_PATH)
+    p_null = sub.add_parser(
+        "null", help="coin-flip control on the same bars as the candidate")
+    p_null.add_argument("--window", choices=("train", "val", "daily"), default="val")
+    p_null.add_argument("--seeds", type=int, default=null.DEFAULT_SEEDS)
+    p_null.add_argument("--trades", type=int, default=0,
+                        help="size the null to this trade count instead of the "
+                             "candidate's — lets you measure a window the "
+                             "candidate produces no trades on")
     sub.add_parser("robustness", help="perturbation + daily regime checks")
     sub.add_parser("gate", help="burn-once holdout verdict")
 
@@ -103,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
             _print_result("train", outcome.train)
             _print_result("validation", outcome.val)
             _print_result("baseline (live strategy) on validation", outcome.baseline_val)
+        if outcome.val_null is not None and outcome.val_null.seeds and outcome.val is not None:
+            n = outcome.val_null
+            print(f"coin-flip null on validation: {n.seeds} seeds, mean={n.mean:+.2%}, "
+                  f"p{int(null.NULL_QUANTILE * 100)}={n.threshold:+.2%} — candidate at the "
+                  f"{n.percentile_of(outcome.val.expectancy):.1%} percentile")
         print(f"registry now holds {registry.trial_count(args.registry)} unique trials")
         return 0
 
@@ -140,6 +163,40 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nsaved to {REPORT_PATH}")
         return 0
 
+    if args.command == "null":
+        if args.window == "daily":
+            windows = {s: data.load_bars("daily", s, args.data_dir) for s in cfg.symbols}
+        else:
+            bars = {s: data.load_bars("intraday", s, args.data_dir) for s in cfg.symbols}
+            bars = {s: b for s, b in bars.items() if b[0]}
+            train_w, val_w = search.split_all(bars)
+            windows = train_w if args.window == "train" else val_w
+        windows = {s: b for s, b in windows.items() if b[0]}
+        candidate_result = search.run_family(windows, run_cfg, SimParams(), family, sig)
+        target = args.trades or candidate_result.n
+        summary = null.null_distribution(windows, run_cfg, SimParams(),
+                                         target, seeds=args.seeds)
+        print(f"\n{args.window} window — candidate vs coin flip")
+        _print_result("candidate", candidate_result)
+        if summary.seeds == 0:
+            print("null: no trades on any seed — nothing to compare against."
+                  + ("" if args.trades else " Pass --trades N to size the null "
+                     "directly when the candidate produces no trades here."))
+            return 1
+        print(f"null: {summary.seeds} seeds, fire_rate={summary.fire_rate:.5f}, "
+              f"mean trades={summary.mean_trades:.0f}")
+        print(f"  mean expectancy      {summary.mean:+.2%}")
+        print(f"  p{int(null.NULL_QUANTILE * 100)} threshold        "
+              f"{summary.threshold:+.2%}")
+        beats = summary.beats(candidate_result.expectancy)
+        print(f"  candidate percentile {summary.percentile_of(candidate_result.expectancy):.1%}"
+              f"  -> {'BEATS' if beats else 'DOES NOT BEAT'} the null")
+        if abs(summary.mean) > 0.02:
+            print("\nWARNING: a coin flip should score about zero minus costs. It does not "
+                  "here, which means the P&L model is not valid on these bars — treat every "
+                  "number computed on them as unusable, not merely optimistic.")
+        return 0 if beats else 1
+
     if args.command == "robustness":
         bars = {s: data.load_bars("intraday", s, args.data_dir) for s in cfg.symbols}
         bars = {s: b for s, b in bars.items() if b[0]}
@@ -150,9 +207,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {row.label:<32} n={row.trades:<4} expectancy={row.expectancy:+.2%}")
         r_ok, r_rows = robustness.daily_regime_check(run_cfg, family, sig,
                                                      data_dir=args.data_dir)
-        print("daily regime folds:")
+        print("daily regime folds (each must beat its own coin-flip null):")
         for row in r_rows:
-            print(f"  {row.label:<8} n={row.trades:<4} expectancy={row.expectancy:+.2%}")
+            bar = ("not countable" if row.null_threshold is None
+                   else f"null p95={row.null_threshold:+.2%} (null n={row.null_trades:.0f})")
+            print(f"  {row.label:<8} n={row.trades:<4} expectancy={row.expectancy:+.2%}"
+                  f"   {bar}")
         print(f"\nperturbation: {'PASS' if p_ok else 'FAIL'}   "
               f"regime: {'PASS' if r_ok else 'FAIL'}")
         return 0 if (p_ok and r_ok) else 1
