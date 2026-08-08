@@ -69,12 +69,12 @@ def run_family(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
 
 
 def split_all(bars_by_symbol: dict[str, Bars]) -> tuple[dict[str, Bars], dict[str, Bars]]:
-    train_w: dict[str, Bars] = {}
-    val_w: dict[str, Bars] = {}
-    for symbol, (closes, times) in bars_by_symbol.items():
-        train, val = data.split_train_val(closes, times)
-        train_w[symbol], val_w[symbol] = train, val
-    return train_w, val_w
+    """(train, validation) at ONE shared calendar cutoff across every symbol.
+
+    Delegates to data.split_all rather than cutting each symbol at a fraction of
+    its own bar count — see data.union_cutoff for why that mattered.
+    """
+    return data.split_all(bars_by_symbol, data.TRAIN_FRACTION)
 
 
 def resolve_family(candidate: dict) -> Family:
