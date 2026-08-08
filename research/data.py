@@ -84,23 +84,59 @@ def filter_to_session(closes: list[float], times: list[datetime]) -> Bars:
 
 # --- pure split logic (no I/O, fully unit-testable) ---
 
-def split_history(closes: list[float], times: list[datetime],
-                  research_fraction: float = RESEARCH_FRACTION,
-                  embargo: int = EMBARGO_BARS) -> tuple[Bars, Bars]:
-    """(research, holdout): chronological cut with `embargo` bars dropped
-    between the segments so an indicator lookback can't straddle the cut."""
-    cut = int(len(closes) * research_fraction)
-    research = (closes[:cut], times[:cut])
-    holdout = (closes[cut + embargo:], times[cut + embargo:])
-    return research, holdout
+def union_cutoff(times_by_symbol: dict[str, list[datetime]],
+                 fraction: float) -> datetime | None:
+    """The single timestamp with `fraction` of ALL symbols' bars pooled before it.
+
+    Splits used to cut each symbol at a fraction of ITS OWN bar count. Bar counts
+    range from 5,043 (COST) to 6,738 (QQQ), so the train/validation cut landed on
+    9 different dates spanning 2026-02-19 to 2026-03-05, and holdout starts on 8
+    dates. For 30 near-100%-beta names that means the same market move sat in one
+    symbol's training window and another's validation window — the embargo could
+    not help, because it only ever guarded WITHIN a symbol.
+    """
+    pooled = sorted(t for times in times_by_symbol.values() for t in times)
+    if not pooled:
+        return None
+    return pooled[min(len(pooled) - 1, max(0, int(len(pooled) * fraction)))]
 
 
-def split_train_val(closes: list[float], times: list[datetime],
-                    train_fraction: float = TRAIN_FRACTION,
-                    embargo: int = EMBARGO_BARS) -> tuple[Bars, Bars]:
-    """(train, validation) split of the research slice, same embargo rule."""
-    cut = int(len(closes) * train_fraction)
-    return (closes[:cut], times[:cut]), (closes[cut + embargo:], times[cut + embargo:])
+def split_at(closes: list[float], times: list[datetime], cutoff: datetime,
+             embargo: int = EMBARGO_BARS) -> tuple[Bars, Bars]:
+    """(before, after) at a SHARED calendar cutoff.
+
+    The cutoff is calendar-shared so one market moment lands on the same side of
+    the split for every symbol. The embargo stays counted in BARS, per symbol,
+    because its job is to stop an indicator lookback straddling the cut and the
+    slowest indicator needs ~31 bars whatever wall-clock span that covers.
+    """
+    before_c: list[float] = []
+    before_t: list[datetime] = []
+    after_c: list[float] = []
+    after_t: list[datetime] = []
+    for close, ts in zip(closes, times, strict=True):
+        if ts < cutoff:
+            before_c.append(close)
+            before_t.append(ts)
+        else:
+            after_c.append(close)
+            after_t.append(ts)
+    return (before_c, before_t), (after_c[embargo:], after_t[embargo:])
+
+
+def split_all(bars_by_symbol: dict[str, Bars],
+              fraction: float, embargo: int = EMBARGO_BARS
+              ) -> tuple[dict[str, Bars], dict[str, Bars]]:
+    """Apply one shared cutoff across every symbol."""
+    cutoff = union_cutoff({s: times for s, (_, times) in bars_by_symbol.items()},
+                          fraction)
+    if cutoff is None:
+        return {}, {}
+    before: dict[str, Bars] = {}
+    after: dict[str, Bars] = {}
+    for symbol, (closes, times) in bars_by_symbol.items():
+        before[symbol], after[symbol] = split_at(closes, times, cutoff, embargo)
+    return before, after
 
 
 def bars_before(closes: list[float], times: list[datetime],
@@ -165,12 +201,20 @@ def load_holdout_bars(symbol: str, data_dir: Path = DATA_DIR) -> Bars:
 
 def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
               data_dir: Path = DATA_DIR) -> None:
-    """Download intraday + daily history for every universe symbol, split
-    off the holdout slice, and write the CSV cache."""
+    """Download intraday + daily history for every universe symbol, split off
+    the holdout slice at ONE shared calendar cutoff, and write the CSV cache.
+
+    Two passes on purpose: the research/holdout cutoff cannot be known until
+    every symbol's bars are in hand, because it is a quantile of the pooled
+    timeline rather than of any one symbol's bar count.
+    """
     client = StockHistoricalDataClient(cfg.api_key, cfg.secret_key)
+
+    # Pass 1: download. Session-filter before splitting so the fractions are
+    # computed over tradeable bars only.
+    intraday_by_symbol: dict[str, Bars] = {}
+    daily_by_symbol: dict[str, Bars] = {}
     for symbol in cfg.symbols:
-        # Session-filter BEFORE splitting, so the train/val/holdout fractions
-        # are computed over tradeable bars only.
         intraday = filter_to_session(*_fetch(
             client, symbol,
             TimeFrame(cfg.bar_timeframe_minutes, TimeFrameUnit.Minute),
@@ -179,13 +223,30 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
         if not intraday[0]:
             log.warning("%s: no intraday bars returned; skipping symbol", symbol)
             continue
-        research, holdout = split_history(*intraday)
+        intraday_by_symbol[symbol] = intraday
+        daily_by_symbol[symbol] = _fetch(client, symbol, TimeFrame.Day,
+                                         days=daily_years * 365)
+
+    if not intraday_by_symbol:
+        log.warning("no symbols returned intraday bars; nothing cached")
+        return
+
+    # Pass 2: one cutoff for the whole universe, then write.
+    research_w, holdout_w = split_all(intraday_by_symbol, RESEARCH_FRACTION)
+    holdout_start = min((times[0] for _, times in holdout_w.values() if times),
+                        default=None)
+    log.info("shared research/holdout cutoff -> holdout starts %s", holdout_start)
+
+    for symbol, research in research_w.items():
+        holdout = holdout_w[symbol]
         save_bars(Path(data_dir) / "intraday" / f"{symbol}.csv", *research)
         save_bars(Path(data_dir) / "holdout" / f"{symbol}.csv", *holdout)
 
-        daily = _fetch(client, symbol, TimeFrame.Day, days=daily_years * 365)
-        if holdout[1]:  # quarantine the same calendar window in the dailies
-            daily = bars_before(*daily, cutoff=holdout[1][0])
+        daily = daily_by_symbol[symbol]
+        if holdout_start is not None:
+            # Quarantine the same calendar window in the dailies, using the
+            # SHARED holdout start so no symbol's dailies reach past it.
+            daily = bars_before(*daily, cutoff=holdout_start)
         save_bars(Path(data_dir) / "daily" / f"{symbol}.csv", *daily)
 
         log.info("%s: cached %d intraday research bars, %d holdout, %d daily",

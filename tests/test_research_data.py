@@ -89,10 +89,10 @@ def test_holdout_bars_are_session_filtered(tmp_path: Path):
     assert data.load_holdout_bars("SPY", data_dir=tmp_path) == ([2.0], [times[1]])
 
 
-def test_split_history_no_overlap_and_embargo_gap():
+def test_split_at_no_overlap_and_embargo_gap():
     closes, times = _bars(100)
-    (r_closes, r_times), (h_closes, h_times) = data.split_history(
-        closes, times, research_fraction=0.8, embargo=5
+    (r_closes, r_times), (h_closes, h_times) = data.split_at(
+        closes, times, cutoff=times[80], embargo=5
     )
     assert len(r_closes) == 80
     assert h_closes == closes[85:]          # 5 embargo bars dropped entirely
@@ -100,22 +100,54 @@ def test_split_history_no_overlap_and_embargo_gap():
     assert not set(r_times) & set(h_times)  # no shared bars
 
 
-def test_split_train_val_embargo():
-    closes, times = _bars(100)
-    (t_closes, _), (v_closes, v_times) = data.split_train_val(
-        closes, times, train_fraction=0.75, embargo=5
-    )
-    assert len(t_closes) == 75
-    assert v_closes == closes[80:]
-    assert v_times[0] == times[80]
-
-
 def test_split_embargo_larger_than_remainder_gives_empty_holdout():
     closes, times = _bars(20)
-    _, (h_closes, h_times) = data.split_history(
-        closes, times, research_fraction=0.8, embargo=10
+    _, (h_closes, h_times) = data.split_at(
+        closes, times, cutoff=times[16], embargo=10
     )
     assert h_closes == [] and h_times == []
+
+
+def test_union_cutoff_is_one_timestamp_for_every_symbol():
+    """THE bug this replaces: cutting each symbol at a fraction of its OWN bar
+    count. Real bar counts ranged 5,043 to 6,738, so the train/val cut landed on
+    9 different dates and the same market move sat in one symbol's train window
+    and another's validation window. A per-symbol fraction cannot fix that; a
+    shared cutoff can."""
+    long_closes, long_times = _bars(100)
+    short_closes, short_times = _bars(40)   # same start, far fewer bars
+    bars_by_symbol = {"LONG": (long_closes, long_times),
+                      "SHORT": (short_closes, short_times)}
+
+    train_w, val_w = data.split_all(bars_by_symbol, fraction=0.75, embargo=0)
+
+    # Every symbol's training window ends before every symbol's validation
+    # window begins — across symbols, not just within one.
+    last_train = max(times[-1] for _, times in train_w.values() if times)
+    first_val = min(times[0] for _, times in val_w.values() if times)
+    assert last_train < first_val
+
+    # And the old per-symbol-fraction behaviour would NOT have held that:
+    # 75% of 100 bars is a much later timestamp than 75% of 40 bars.
+    assert long_times[75] > short_times[30]
+
+
+def test_union_cutoff_pools_bars_rather_than_symbols():
+    """The cutoff is a quantile of the pooled timeline, so a symbol with more
+    bars pulls it later — that is correct, because the quantile is about how
+    much DATA is on each side, not how many tickers."""
+    _, dense = _bars(100)
+    sparse_closes, sparse_times = [1.0, 2.0], [dense[0], dense[-1]]
+    cutoff = data.union_cutoff({"DENSE": dense, "SPARSE": sparse_times}, 0.5)
+    assert cutoff is not None
+    assert dense[40] <= cutoff <= dense[60]
+    assert data.union_cutoff({}, 0.5) is None
+    assert data.union_cutoff({"EMPTY": []}, 0.5) is None
+    assert sparse_closes == [1.0, 2.0]      # fixture untouched
+
+
+def test_split_all_on_empty_input_is_empty_not_a_crash():
+    assert data.split_all({}, fraction=0.75) == ({}, {})
 
 
 def test_bars_before_cutoff():
