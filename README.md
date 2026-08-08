@@ -79,7 +79,7 @@ The random signal is deliberately built as a real `Family` and run through
 with its own private simulator would drift away from the thing it is supposed to
 be measuring, which is the exact class of bug it exists to catch.
 
-## Two more defects the same audit turned up
+## Four more defects the same audit turned up
 
 **Un-tradeable bars.** 10,485 of 166,473 cached bars (**6.30%**) fell outside
 09:30–16:00 ET. US listed options don't trade then, so an "exit" priced off an
@@ -92,23 +92,67 @@ daily cache contained a −95.1% single "day" in GOOGL (its 20:1 split), −94.9
 in AMZN, −90.1% in NFLX, −89.9% in NVDA. At 80× gearing a put "earns" +7,600%
 on that, inside the multi-year regime check.
 
+**Splits cut per symbol, not per calendar.** Each symbol was cut at a fraction
+of *its own* bar count. Bar counts range 5,043 (COST) to 6,738 (QQQ), so the
+train/validation boundary landed on **9 different dates** spanning 2026-02-19 to
+2026-03-05. On a universe of near-100%-beta names that is a leak: the same
+market move sat in one symbol's training window and another's validation window,
+and `EMBARGO_BARS` couldn't help because it only ever guarded *within* a symbol.
+Now one cutoff is computed as a quantile of the pooled timeline — 9 dates
+collapse to 1, and the latest training bar anywhere precedes the earliest
+validation bar anywhere. The embargo stays counted in *bars*, because its job is
+stopping an indicator lookback straddling the cut.
+
+**A guard that could never pass.** `max_entry_vol` is documented as per-bar
+return stdev *on 15-minute bars*; `daily_regime_check` ran that same number
+against daily bars, where stdev is ~√26 larger. The pending spec matched **zero**
+daily bars in all six year folds, so the check reported FAIL for a unit mismatch
+rather than an economic reason — and no spec using a volatility filter could
+ever have passed it. Bar-relative params are now rescaled by √(bars per day);
+bar *counts* are left alone. `entry_hours`, which has no daily equivalent at
+all, now reports NOT EVALUABLE, which is distinct from failing.
+
+Both of those I had first written off as "real, but not what caused the false
+edge." They were still wrong, so they're fixed.
+
 ## What it did to the headline result
 
 The previous version of this README led with a candidate at "+35.4% validation
 expectancy over 32 trades, against the live strategy's +5.2%." Re-measured after
-the fixes:
+all of the above:
 
 | window | candidate | its own coin-flip null | verdict |
 |---|---|---|---|
-| **train** (what it was selected on) | −3.28% over 148 trades | mean −2.63%, p95 +6.38% | **38.3rd percentile — worse than random** |
-| **validation** | +37.12% over 25 trades | mean −3.98%, p95 +16.74% | beats the null, but 25 < the 30-trade floor |
+| **train** (what it was selected on) | −3.28% over 148 trades | mean −1.36%, p95 +12.27% | **46.7th percentile — a coin flip does better** |
+| **validation** | +39.91% over 24 trades | mean −0.18%, p95 +18.40% | beats the null, but 24 < the 30-trade floor |
 
-It cannot beat a coin flip on the data it was selected on. It would no longer be
-accepted by `search`, and the burn-once holdout gate has still never been run —
-which is the correct outcome, not a disappointment. Every one of the 986 logged
-trials remains committed and counted in `N`, because those attempts genuinely
-happened; they are marked non-comparable by a `dataset_change` row rather than
-deleted.
+It cannot beat a coin flip on the data it was selected on. Clustering its trades
+by entry bar drops its Sharpe from +0.4166 to +0.2641 and its deflated Sharpe
+from 0.6471 to 0.3226 against a 0.95 bar — it was already failing, and now it
+fails by the margin the evidence actually supports.
+
+**The observation it was built on inverted.** The LLM proposal's stated
+hypothesis was *"low-vol entries +52.5% vs −2.2% in high vol — trade only when
+entry volatility is calm."* Re-running the same failure report over corrected
+bars:
+
+| entry volatility | before | after |
+|---|---|---|
+| low | **+52.5%** | **−13.3%** (n=50, 74% losers) |
+| high | −2.2% | +3.9% (n=49) |
+
+The calm-volatility edge was the artifact. Low-vol entries are now the *worst*
+bucket, which is what you would expect once volatility stops being a source of
+free expectancy: the bug paid out in proportion to how far a bar overshot its
+barrier, so the strategy that looked best was the one selecting for the bars
+where that mattered most. A spec built to exploit that observation was always
+going to be a spec built to exploit the bug.
+
+It would no longer be accepted by `search`, and the burn-once holdout gate has
+still never been run — which is the correct outcome, not a disappointment. Every
+one of the 986 logged trials remains committed and counted in `N`, because those
+attempts genuinely happened; they are marked non-comparable by a
+`dataset_change` row rather than deleted.
 
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
 endpoint. Nothing here is financial advice, and the live strategy has **no
@@ -172,16 +216,19 @@ non-fills are absent; partial fills; assignment; multi-contract sizing.
 
 ### A live-engine bug replay found on its first real run
 
-`option_return` floors at −100%, so a total loss prices a position at exactly
-`0.0` — and `manage_exits` skips any position with `current_price <= 0` (*"no
-price; skipping exit check"*). Live, a dying option really can quote a zero bid.
-So a worthless position is **never closed** and permanently occupies one of the
-three `max_positions` slots.
+`manage_exits` skipped any position with `current_price <= 0`, logging *"no
+price; skipping exit check"*. The name was the bug. `get_option_positions`
+prices at the bid and falls back to Alpaca's mark, so zero means neither exists
+— the contract is dead, not unpriced. Because the guard `continue`d before
+`risk.exit_reason` ran, **no** exit rule applied: not the stop, not the time
+stop, not max hold. The position sat there holding one of three `max_positions`
+slots until expiry — up to two weeks of the account's capacity, for nothing.
 
-It is reproduced by a test and deliberately **not fixed**: `close_option` posts a
-limit at the bid, and a limit at zero is meaningless, so the fix requires
-deciding how the live bot abandons a worthless position. That's a trading
-decision, not a refactor.
+Fixed by falling through instead of skipping. `pnl_pct` is then −100%,
+`exit_reason` returns the stop loss, and `close_option` **already** market-closes
+when handed a bid of zero — that path existed and was simply unreachable. I had
+first called this a trading decision needing a market-order design; that was
+wrong, and reading `broker.py` instead of assuming would have caught it sooner.
 
 ![Dashboard — live signal reasoning, risk gates, and bot controls](docs/dashboard.png)
 
