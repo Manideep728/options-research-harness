@@ -68,6 +68,17 @@ def run_family(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
     return combined
 
 
+def _score(result: SimResult) -> dict:
+    """Registry-ready scores, with the Sharpe clustered by entry bar.
+
+    Trades that fired on the same bar across a correlated universe are one
+    market move; counting them as independent overstates the confidence that
+    feeds expected_max_sharpe and, through it, every deflated Sharpe.
+    """
+    return metrics.summarize([t.pnl_pct for t in result.trades],
+                             [t.entry_time for t in result.trades])
+
+
 def split_all(bars_by_symbol: dict[str, Bars]) -> tuple[dict[str, Bars], dict[str, Bars]]:
     """(train, validation) at ONE shared calendar cutoff across every symbol.
 
@@ -157,7 +168,7 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
                                    family, sig_params)
             registry.log_trial(
                 registry_path, family_name, params,
-                "train", metrics.summarize([t.pnl_pct for t in train_res.trades]),
+                "train", _score(train_res),
                 dataset=train_id,
             )
             n, expectancy = train_res.n, train_res.expectancy
@@ -187,7 +198,7 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
     for symbol, (closes, times) in val_w.items():
         baseline_val.trades.extend(simulate(closes, times, cfg, sp, symbol=symbol).trades)
     registry.log_trial(registry_path, family_name, {**best_sig, **best_exit},
-                       "val", metrics.summarize([t.pnl_pct for t in val_res.trades]),
+                       "val", _score(val_res),
                        dataset=val_id)
 
     # The coin-flip control on the same validation bars, sized to the winner's
