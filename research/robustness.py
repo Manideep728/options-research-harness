@@ -65,13 +65,21 @@ class PerturbationRow:
 
 
 def perturbation_grid(base: SimParams) -> list[tuple[str, SimParams]]:
+    """The three constants the pricing model cannot derive from the bars.
+
+    These replaced delta and theta, which are now outputs of bot/pricing.py
+    rather than inputs. Implied volatility sets the premium and therefore the
+    gearing; days to expiry sets how fast the premium decays; the round trip is
+    the spread. A candidate that only works at one implied volatility has found
+    a seam in the pricing model, not an edge in the market.
+    """
     out = []
-    for f_delta, f_theta, f_cost in itertools.product(_FACTORS, repeat=3):
-        label = f"delta x{f_delta} theta x{f_theta} cost x{f_cost}"
+    for f_iv, f_dte, f_cost in itertools.product(_FACTORS, repeat=3):
+        label = f"iv x{f_iv} dte x{f_dte} cost x{f_cost}"
         out.append((label, dc_replace(
             base,
-            delta=base.delta * f_delta,
-            theta_daily=base.theta_daily * f_theta,
+            iv=base.iv * f_iv,
+            dte_days=base.dte_days * f_dte,
             roundtrip_cost=base.roundtrip_cost * f_cost,
         )))
     return out

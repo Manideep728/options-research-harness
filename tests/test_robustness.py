@@ -26,9 +26,9 @@ def test_perturbation_grid_covers_all_factor_combos():
     grid = robustness.perturbation_grid(SimParams())
     assert len(grid) == 27
     labels = [label for label, _ in grid]
-    assert "delta x1.0 theta x1.0 cost x1.0" in labels
-    deltas = {sp.delta for _, sp in grid}
-    assert deltas == {0.2, 0.4, 0.6000000000000001} or len(deltas) == 3
+    assert "iv x1.0 dte x1.0 cost x1.0" in labels
+    ivs = {round(sp.iv, 6) for _, sp in grid}
+    assert len(ivs) == 3
 
 
 def test_check_perturbations_flags_cost_sensitive_edge():
