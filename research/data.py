@@ -30,6 +30,7 @@ delete the entire daily cache.
 
 import csv
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
@@ -66,6 +67,56 @@ EMBARGO_BARS = 60
 Bars = tuple[list[float], list[datetime]]
 
 
+@dataclass(frozen=True)
+class OhlcBars:
+    """Full bars, for the two things closes alone cannot answer: where price
+    went WITHIN a bar, and how wide the bar was.
+
+    `has_intrabar` is False when the row came from a close-only cache, where
+    the high and low are copies of the close. Callers that resolve barrier
+    order or measure range must check it. Without the flag a stale cache would
+    silently degrade intra-bar logic back to close-only guessing, which is the
+    exact defect this field exists to expose.
+    """
+
+    times: list[datetime]
+    opens: list[float]
+    highs: list[float]
+    lows: list[float]
+    closes: list[float]
+    volumes: list[float]
+    has_intrabar: bool
+
+    def __len__(self) -> int:
+        return len(self.closes)
+
+    @property
+    def bars(self) -> Bars:
+        """The (closes, times) pair every existing caller expects."""
+        return self.closes, self.times
+
+    def take(self, indices: list[int]) -> "OhlcBars":
+        """Keep `indices`, in order, across every column at once. Splitting and
+        filtering pick rows, so they select indices and apply them here rather
+        than each re-zipping a different subset of the columns."""
+        return OhlcBars(
+            times=[self.times[i] for i in indices],
+            opens=[self.opens[i] for i in indices],
+            highs=[self.highs[i] for i in indices],
+            lows=[self.lows[i] for i in indices],
+            closes=[self.closes[i] for i in indices],
+            volumes=[self.volumes[i] for i in indices],
+            has_intrabar=self.has_intrabar,
+        )
+
+
+def ohlc_from_closes(closes: list[float], times: list[datetime]) -> OhlcBars:
+    """Wrap a close-only series, marked as carrying no intra-bar detail."""
+    return OhlcBars(times=list(times), opens=list(closes), highs=list(closes),
+                    lows=list(closes), closes=list(closes),
+                    volumes=[0.0] * len(closes), has_intrabar=False)
+
+
 # --- session filtering (pure, fully unit-testable) ---
 
 def in_session(ts: datetime) -> bool:
@@ -76,14 +127,16 @@ def in_session(ts: datetime) -> bool:
     return SESSION_OPEN <= local < SESSION_CLOSE
 
 
+def session_indices(times: list[datetime]) -> list[int]:
+    """Positions of the bars inside the regular session."""
+    return [i for i, ts in enumerate(times) if in_session(ts)]
+
+
 def filter_to_session(closes: list[float], times: list[datetime]) -> Bars:
     """Drop pre- and post-market bars. Intraday only — see the module
     docstring for why this must never be applied to daily bars."""
-    kept = [(c, t) for c, t in zip(closes, times, strict=True) if in_session(t)]
-    if not kept:
-        return [], []
-    kept_closes, kept_times = zip(*kept, strict=True)
-    return list(kept_closes), list(kept_times)
+    keep = session_indices(times)
+    return [closes[i] for i in keep], [times[i] for i in keep]
 
 
 # --- pure split logic (no I/O, fully unit-testable) ---
@@ -114,18 +167,19 @@ def split_at(closes: list[float], times: list[datetime], cutoff: datetime,
     because its job is to stop an indicator lookback straddling the cut and the
     slowest indicator needs ~31 bars whatever wall-clock span that covers.
     """
-    before_c: list[float] = []
-    before_t: list[datetime] = []
-    after_c: list[float] = []
-    after_t: list[datetime] = []
-    for close, ts in zip(closes, times, strict=True):
-        if ts < cutoff:
-            before_c.append(close)
-            before_t.append(ts)
-        else:
-            after_c.append(close)
-            after_t.append(ts)
-    return (before_c, before_t), (after_c[embargo:], after_t[embargo:])
+    before, after = split_indices(times, cutoff, embargo)
+    return (([closes[i] for i in before], [times[i] for i in before]),
+            ([closes[i] for i in after], [times[i] for i in after]))
+
+
+def split_indices(times: list[datetime], cutoff: datetime,
+                  embargo: int = EMBARGO_BARS) -> tuple[list[int], list[int]]:
+    """Positions before and after `cutoff`, with the embargo already removed
+    from the second half. Splitting selects rows, so the choice is made once
+    here and applied to whichever columns the caller holds."""
+    before = [i for i, ts in enumerate(times) if ts < cutoff]
+    after = [i for i, ts in enumerate(times) if ts >= cutoff]
+    return before, after[embargo:]
 
 
 def split_all(bars_by_symbol: dict[str, Bars],
@@ -141,6 +195,16 @@ def split_all(bars_by_symbol: dict[str, Bars],
     for symbol, (closes, times) in bars_by_symbol.items():
         before[symbol], after[symbol] = split_at(closes, times, cutoff, embargo)
     return before, after
+
+
+def filter_ohlc_to_session(bars: OhlcBars) -> OhlcBars:
+    """Session filter across every column. Intraday only, for the reason in the
+    module docstring."""
+    return bars.take(session_indices(bars.times))
+
+
+def ohlc_before(bars: OhlcBars, cutoff: datetime) -> OhlcBars:
+    return bars.take([i for i, ts in enumerate(bars.times) if ts < cutoff])
 
 
 def bars_before(closes: list[float], times: list[datetime],
@@ -166,19 +230,59 @@ def save_bars(path: Path, closes: list[float], times: list[datetime]) -> None:
             writer.writerow([t.isoformat(), f"{c:.6f}"])
 
 
-def _read_bars(path: Path, session_only: bool = False) -> Bars:
+OHLC_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
+
+
+def save_ohlc(path: Path, bars: OhlcBars) -> None:
+    """Write full bars. The close-only writer stays for series that genuinely
+    have no other columns, such as the CBOE volatility indices."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(OHLC_COLUMNS)
+        for i in range(len(bars)):
+            writer.writerow([
+                bars.times[i].isoformat(),
+                f"{bars.opens[i]:.6f}", f"{bars.highs[i]:.6f}",
+                f"{bars.lows[i]:.6f}", f"{bars.closes[i]:.6f}",
+                f"{bars.volumes[i]:.2f}",
+            ])
+
+
+def _read_ohlc(path: Path, session_only: bool = False) -> OhlcBars:
+    """Read either schema. A file written before the open/high/low/volume
+    columns existed still loads, with high and low set to the close and
+    has_intrabar False — so the 9 MB cache on disk keeps working and no caller
+    can mistake a copied close for a real intra-bar range.
+    """
+    empty = OhlcBars([], [], [], [], [], [], has_intrabar=False)
     if not path.exists():
-        return [], []
-    closes: list[float] = []
+        return empty
     times: list[datetime] = []
+    cols: dict[str, list[float]] = {c: [] for c in OHLC_COLUMNS[1:]}
+    full = True
     with path.open(newline="") as f:
         for row in csv.DictReader(f):
             ts = datetime.fromisoformat(row["timestamp"])
             if session_only and not in_session(ts):
                 continue
+            close = float(row["close"])
             times.append(ts)
-            closes.append(float(row["close"]))
-    return closes, times
+            for column in OHLC_COLUMNS[1:]:
+                raw = row.get(column)
+                if raw is None or raw == "":
+                    full = False
+                    cols[column].append(0.0 if column == "volume" else close)
+                else:
+                    cols[column].append(float(raw))
+    return OhlcBars(times=times, opens=cols["open"], highs=cols["high"],
+                    lows=cols["low"], closes=cols["close"],
+                    volumes=cols["volume"],
+                    has_intrabar=full and bool(times))
+
+
+def _read_bars(path: Path, session_only: bool = False) -> Bars:
+    return _read_ohlc(path, session_only).bars
 
 
 def load_bars(kind: str, symbol: str, data_dir: Path = DATA_DIR) -> Bars:
@@ -208,6 +312,15 @@ def load_vol_index(name: str, data_dir: Path = DATA_DIR) -> Bars:
     return _read_bars(Path(data_dir) / "volidx" / f"{name}.csv")
 
 
+def load_ohlc(kind: str, symbol: str, data_dir: Path = DATA_DIR) -> OhlcBars:
+    """Full bars for a cached symbol. Same kind guard as load_bars, so this
+    cannot reach the holdout directory either."""
+    if kind not in ("intraday", "daily"):
+        raise ValueError(f"unknown dataset kind: {kind!r}")
+    return _read_ohlc(Path(data_dir) / kind / f"{symbol}.csv",
+                      session_only=(kind == "intraday"))
+
+
 def load_vrp_bars(symbol: str, data_dir: Path = DATA_DIR) -> Bars:
     """Daily bars of a VRP underlying. Deliberately NOT the `daily/` cache:
     that one is quarantined to end before the holdout window, while these run
@@ -230,50 +343,61 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
 
     # Pass 1: download. Session-filter before splitting so the fractions are
     # computed over tradeable bars only.
-    intraday_by_symbol: dict[str, Bars] = {}
-    daily_by_symbol: dict[str, Bars] = {}
+    intraday_by_symbol: dict[str, OhlcBars] = {}
+    daily_by_symbol: dict[str, OhlcBars] = {}
     for symbol in cfg.symbols:
-        intraday = filter_to_session(*_fetch(
+        intraday = filter_ohlc_to_session(_fetch_ohlc(
             client, symbol,
             TimeFrame(cfg.bar_timeframe_minutes, TimeFrameUnit.Minute),
             days=intraday_days,
         ))
-        if not intraday[0]:
+        if not len(intraday):
             log.warning("%s: no intraday bars returned; skipping symbol", symbol)
             continue
         intraday_by_symbol[symbol] = intraday
-        daily_by_symbol[symbol] = _fetch(client, symbol, TimeFrame.Day,
-                                         days=daily_years * 365)
+        daily_by_symbol[symbol] = _fetch_ohlc(client, symbol, TimeFrame.Day,
+                                              days=daily_years * 365)
 
     if not intraday_by_symbol:
         log.warning("no symbols returned intraday bars; nothing cached")
         return
 
-    # Pass 2: one cutoff for the whole universe, then write.
-    research_w, holdout_w = split_all(intraday_by_symbol, RESEARCH_FRACTION)
-    holdout_start = min((times[0] for _, times in holdout_w.values() if times),
-                        default=None)
+    # Pass 2: one cutoff for the whole universe, then write. The cutoff is a
+    # quantile of the pooled timeline, so it cannot be known until every
+    # symbol's bars are in hand.
+    cutoff = union_cutoff({s: b.times for s, b in intraday_by_symbol.items()},
+                          RESEARCH_FRACTION)
+    if cutoff is None:
+        log.warning("no timestamps to split on; nothing cached")
+        return
+
+    splits = {s: split_indices(b.times, cutoff)
+              for s, b in intraday_by_symbol.items()}
+    holdout_start = min(
+        (intraday_by_symbol[s].times[after[0]] for s, (_, after) in splits.items() if after),
+        default=None)
     log.info("shared research/holdout cutoff -> holdout starts %s", holdout_start)
 
-    for symbol, research in research_w.items():
-        holdout = holdout_w[symbol]
-        save_bars(Path(data_dir) / "intraday" / f"{symbol}.csv", *research)
-        save_bars(Path(data_dir) / "holdout" / f"{symbol}.csv", *holdout)
+    for symbol, bars in intraday_by_symbol.items():
+        before, after = splits[symbol]
+        research, holdout = bars.take(before), bars.take(after)
+        save_ohlc(Path(data_dir) / "intraday" / f"{symbol}.csv", research)
+        save_ohlc(Path(data_dir) / "holdout" / f"{symbol}.csv", holdout)
 
         daily = daily_by_symbol[symbol]
         if holdout_start is not None:
             # Quarantine the same calendar window in the dailies, using the
             # SHARED holdout start so no symbol's dailies reach past it.
-            daily = bars_before(*daily, cutoff=holdout_start)
-        save_bars(Path(data_dir) / "daily" / f"{symbol}.csv", *daily)
+            daily = ohlc_before(daily, cutoff=holdout_start)
+        save_ohlc(Path(data_dir) / "daily" / f"{symbol}.csv", daily)
 
         log.info("%s: cached %d intraday research bars, %d holdout, %d daily",
-                 symbol, len(research[0]), len(holdout[0]), len(daily[0]))
+                 symbol, len(research), len(holdout), len(daily))
 
 
-def _fetch(client: StockHistoricalDataClient, symbol: str,
-           timeframe: TimeFrame, days: int,
-           feed: DataFeed = DataFeed.IEX) -> Bars:
+def _fetch_ohlc(client: StockHistoricalDataClient, symbol: str,
+                timeframe: TimeFrame, days: int,
+                feed: DataFeed = DataFeed.IEX) -> OhlcBars:
     start = datetime.now(UTC) - timedelta(days=days)
     bars = cast(BarSet, client.get_stock_bars(
         StockBarsRequest(
@@ -285,7 +409,21 @@ def _fetch(client: StockHistoricalDataClient, symbol: str,
             adjustment=Adjustment.ALL,
         )
     )).data.get(symbol, [])
-    return [float(b.close) for b in bars], [b.timestamp for b in bars]
+    return OhlcBars(
+        times=[b.timestamp for b in bars],
+        opens=[float(b.open) for b in bars],
+        highs=[float(b.high) for b in bars],
+        lows=[float(b.low) for b in bars],
+        closes=[float(b.close) for b in bars],
+        volumes=[float(b.volume or 0.0) for b in bars],
+        has_intrabar=True,
+    )
+
+
+def _fetch(client: StockHistoricalDataClient, symbol: str,
+           timeframe: TimeFrame, days: int,
+           feed: DataFeed = DataFeed.IEX) -> Bars:
+    return _fetch_ohlc(client, symbol, timeframe, days, feed).bars
 
 
 # --- CBOE volatility indices: the implied-vol side of the VRP test ---
