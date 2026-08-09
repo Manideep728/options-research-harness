@@ -183,6 +183,50 @@ def test_load_bars_rejects_unknown_kind(tmp_path: Path):
     raise AssertionError("load_bars must not reach the holdout directory")
 
 
+# --- unadjusted splits ---
+
+def test_suspicious_moves_flags_a_split_and_ignores_a_real_crash():
+    """The live defect this was written for: the daily cache still held
+    GOOGL 2235.49 -> 109.05 (-95.1%), its 20:1 split, years after the fetch
+    started sending Adjustment.ALL. A split cannot be repaired on read, so the
+    only defence is to refuse to load it quietly.
+
+    A genuine crash must NOT be flagged. Deciding that a real move was a data
+    defect is its own kind of lie."""
+    times = _days_ = [_at(f"2026-01-{d:02d}T05:00:00+00:00") for d in (5, 6, 7, 8)]
+    split = [2235.49, 109.05, 110.0, 111.0]
+    flagged = data.suspicious_moves(split, times)
+    assert len(flagged) == 1
+    assert flagged[0][0] == times[1]
+    assert flagged[0][1] < -0.9
+
+    covid = [100.0, 88.0, 95.0, 82.0]        # -12%, +8%, -14%: all real
+    assert data.suspicious_moves(covid, _days_) == []
+
+
+def test_suspicious_moves_handles_degenerate_series():
+    assert data.suspicious_moves([], []) == []
+    assert data.suspicious_moves([100.0], [_at("2026-01-05T05:00:00+00:00")]) == []
+
+
+def test_loading_a_split_corrupted_cache_warns(tmp_path: Path, caplog):
+    """Silence is what let this survive. Loading must say so."""
+    times = [_at(f"2026-01-{d:02d}T05:00:00+00:00") for d in (5, 6)]
+    data.save_bars(tmp_path / "daily" / "GOOGL.csv", [2235.49, 109.05], times)
+    with caplog.at_level("WARNING"):
+        data.load_ohlc("daily", "GOOGL", data_dir=tmp_path)
+    assert "unadjusted split" in caplog.text
+    assert "GOOGL" in caplog.text
+
+
+def test_clean_data_loads_without_a_warning(tmp_path: Path, caplog):
+    closes, times = _bars(10)
+    data.save_bars(tmp_path / "daily" / "SPY.csv", closes, times)
+    with caplog.at_level("WARNING"):
+        data.load_ohlc("daily", "SPY", data_dir=tmp_path)
+    assert "unadjusted split" not in caplog.text
+
+
 # --- full OHLC bars ---
 
 def _ohlc(n: int) -> data.OhlcBars:
