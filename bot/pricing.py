@@ -103,6 +103,20 @@ def vega(spot: float, strike: float, years: float, vol: float,
     return spot * _pdf(d1) * math.sqrt(years)
 
 
+def spread_value(spot: float, short_strike: float, long_strike: float,
+                 years: float, vol: float, call_put: str,
+                 rate: float = DEFAULT_RATE) -> float:
+    """Value of a vertical spread: short one strike, long a further-OTM one.
+
+    Always non-negative, because the short leg is the nearer strike and is
+    therefore worth at least as much as the protective one. That is what makes
+    the position a credit at entry and caps the loss at the width.
+    """
+    near = price(spot, short_strike, years, vol, call_put, rate)
+    far = price(spot, long_strike, years, vol, call_put, rate)
+    return max(near - far, 0.0)
+
+
 def strike_for(spot: float, otm_pct: float, call_put: str) -> float:
     """The strike `otm_pct` out of the money, rounded to a cent.
 

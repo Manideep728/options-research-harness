@@ -75,6 +75,10 @@ class SimParams:
     dte_days: float = 10.0           # days to expiry when the trade is opened
     rate: float = pricing.DEFAULT_RATE
     roundtrip_cost: float = 0.03     # spread paid entering + exiting
+    # Distance from the short strike to the protective one, as a fraction of
+    # spot. Only a credit spread uses it. It sets the maximum loss, so it is
+    # the single most important risk number for a short-premium strategy.
+    spread_width_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -245,6 +249,103 @@ def simulate(
         i = exit_j + 1  # flat again; scan for the next signal
 
     return result
+
+
+@dataclass(frozen=True)
+class OpenStructure:
+    """What a trade actually holds: a long option, or a credit spread.
+
+    A NAKED short option is deliberately not representable. Its loss is
+    unbounded for a call and strike-sized for a put, and a backtest that can
+    express a position the risk rules must never allow will eventually report a
+    result that depends on taking it. Every short here is defined-risk.
+
+    `max_loss` is the capital genuinely at risk per share, and every return is
+    quoted against it. For a long option that is the premium paid, so the
+    existing meaning of pnl_pct is unchanged. For a credit spread it is the
+    width less the credit, which is the number position sizing has to use — a
+    return quoted against the credit alone would call a 20 dollar risk a 100
+    percent gain on a 5 dollar credit.
+    """
+
+    call_put: str
+    short_strike: float
+    long_strike: float | None     # None for a long option
+    is_credit: bool
+    entry_value: float            # cash actually paid, or actually received
+    max_loss: float               # per share; > 0
+
+    @property
+    def max_gain(self) -> float:
+        """Best possible return on risk. A credit spread cannot earn more than
+        the credit it collected, so a take-profit above this can never trigger
+        — see unreachable_take_profit()."""
+        if self.max_loss <= 0.0:
+            return 0.0
+        return (self.entry_value if self.is_credit else float("inf")) / self.max_loss
+
+    def value_at(self, spot: float, days: float, sp: SimParams,
+                 iv: float | None = None) -> float:
+        """Mid value of the structure now, per share."""
+        years = max(0.0, (sp.dte_days - days) / 365.0)
+        vol = sp.iv if iv is None else iv
+        if self.long_strike is None:
+            return pricing.price(spot, self.short_strike, years, vol,
+                                 self.call_put, sp.rate)
+        return pricing.spread_value(spot, self.short_strike, self.long_strike,
+                                    years, vol, self.call_put, sp.rate)
+
+    def return_at(self, spot: float, days: float, sp: SimParams,
+                  iv: float | None = None) -> float:
+        """Profit as a fraction of capital at risk.
+
+        Both `entry_value` and `max_loss` already carry the spread, so the
+        worst case here is exactly -1. Charging the exit cost on top of a
+        structural maximum would report a loss larger than the capital the
+        position could ever consume, and position sizing trusts max_loss to be
+        a real bound.
+        """
+        if self.max_loss <= 0.0:
+            return 0.0
+        half = sp.roundtrip_cost / 2.0
+        now = self.value_at(spot, days, sp, iv)
+        if self.is_credit:
+            # Sold to open below mid, bought back above it.
+            return (self.entry_value - now * (1.0 + half)) / self.max_loss
+        return (now * (1.0 - half) - self.entry_value) / self.max_loss
+
+
+def open_structure(spot: float, call_put: str, sp: SimParams,
+                   is_credit: bool = False,
+                   iv: float | None = None) -> OpenStructure:
+    """Build the structure a signal at `spot` would open."""
+    short_strike = pricing.strike_for(spot, sp.otm_pct, call_put)
+    years = sp.dte_days / 365.0
+    vol = sp.iv if iv is None else iv
+    half = sp.roundtrip_cost / 2.0
+    if not is_credit:
+        # Bought above mid. The cash paid is the whole risk.
+        paid = pricing.price(spot, short_strike, years, vol, call_put,
+                             sp.rate) * (1.0 + half)
+        return OpenStructure(call_put, short_strike, None, False, paid,
+                             max_loss=max(1e-9, paid))
+    width = max(0.01, spot * sp.spread_width_pct)
+    long_strike = round(short_strike + (width if call_put == "call" else -width), 2)
+    received = pricing.spread_value(spot, short_strike, long_strike, years, vol,
+                                    call_put, sp.rate) * (1.0 - half)
+    # The width is the most the spread can ever be worth, and closing it costs
+    # the spread too, so this is the true worst case rather than the textbook
+    # width-minus-credit. Sizing gates on it, so it has to be a real bound.
+    worst = abs(short_strike - long_strike) * (1.0 + half)
+    return OpenStructure(call_put, short_strike, long_strike, True, received,
+                         max_loss=max(0.01, worst - received))
+
+
+def unreachable_take_profit(structure: OpenStructure, take_profit: float) -> bool:
+    """True when the take-profit target is above anything the structure can
+    earn. Silently unreachable exits are how a strategy ends up judged only on
+    its stops."""
+    return take_profit > structure.max_gain
 
 
 def contract_for(entry_px: float, direction: float,
