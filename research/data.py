@@ -52,6 +52,10 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 # CBOE serves the index CSVs only to a browser-shaped request.
 USER_AGENT = "Mozilla/5.0 (compatible; trading-bot-research/1.0)"
 
+# One-bar move beyond which a daily price series is almost certainly carrying
+# an unadjusted split rather than a real move. See suspicious_moves().
+SPLIT_MOVE_THRESHOLD = 0.35
+
 # Regular US equity session, in exchange-local time so DST is handled for us.
 MARKET_TZ = ZoneInfo("America/New_York")
 SESSION_OPEN = time(9, 30)
@@ -312,13 +316,57 @@ def load_vol_index(name: str, data_dir: Path = DATA_DIR) -> Bars:
     return _read_bars(Path(data_dir) / "volidx" / f"{name}.csv")
 
 
+def suspicious_moves(closes: list[float], times: list[datetime],
+                     threshold: float = SPLIT_MOVE_THRESHOLD
+                     ) -> list[tuple[datetime, float]]:
+    """Single-bar moves too large to be a real price change.
+
+    A 20:1 split reads as -95% in one bar when the request forgot
+    `Adjustment.ALL`. The fetch sets it now, but a cache written before that
+    keeps the artifact forever: unlike the session filter, a split cannot be
+    repaired on read, because the adjustment factor is not in the file. The
+    only fix is to fetch again, so the least this can do is refuse to stay
+    quiet about it.
+
+    A heuristic, deliberately loose. Real single-day moves reach roughly 25-30%
+    on an earnings gap, while split artifacts sit near 90%. Anything flagged
+    here is reported, never dropped — deciding a real crash was a data defect
+    would be its own kind of lie.
+    """
+    out = []
+    for i in range(1, len(closes)):
+        prev, now = closes[i - 1], closes[i]
+        if prev <= 0 or now <= 0:
+            continue
+        move = now / prev - 1.0
+        if abs(move) >= threshold:
+            out.append((times[i], move))
+    return out
+
+
+def warn_on_suspicious_moves(label: str, bars: OhlcBars) -> None:
+    flagged = suspicious_moves(bars.closes, bars.times)
+    if not flagged:
+        return
+    worst = min(flagged, key=lambda row: row[1])
+    log.warning(
+        "%s: %d bar(s) move more than %.0f%% in one step, worst %+.1f%% on %s. "
+        "This is what an unadjusted split looks like. Re-fetch before trusting "
+        "any number computed on these bars.",
+        label, len(flagged), SPLIT_MOVE_THRESHOLD * 100, worst[1] * 100,
+        worst[0].date(),
+    )
+
+
 def load_ohlc(kind: str, symbol: str, data_dir: Path = DATA_DIR) -> OhlcBars:
     """Full bars for a cached symbol. Same kind guard as load_bars, so this
     cannot reach the holdout directory either."""
     if kind not in ("intraday", "daily"):
         raise ValueError(f"unknown dataset kind: {kind!r}")
-    return _read_ohlc(Path(data_dir) / kind / f"{symbol}.csv",
+    bars = _read_ohlc(Path(data_dir) / kind / f"{symbol}.csv",
                       session_only=(kind == "intraday"))
+    warn_on_suspicious_moves(f"{kind}/{symbol}", bars)
+    return bars
 
 
 def load_vrp_bars(symbol: str, data_dir: Path = DATA_DIR) -> Bars:
