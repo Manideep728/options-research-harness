@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 from bot.config import Settings
 from bot.options import Contract, pick_contract
-from bot.simulator import SimParams, gearing_of, option_return
+from bot.simulator import SimParams, option_return
 from bot.strategy import Action
 from research import replay
 from research.data import MARKET_TZ
@@ -140,7 +140,7 @@ def test_positions_reprice_through_the_shared_option_model(tmp_path):
     position = broker.get_option_positions()[0]
     expected_ret = option_return(
         broker.get_underlying_price("SPY"), entry_spot, 1.0,
-        (broker.now - entry_time).total_seconds() / 86400, gearing_of(SP), SP,
+        (broker.now - entry_time).total_seconds() / 86400, SP,
     )
     assert position.current_price == max(0.0, entry_premium * (1 + expected_ret))
 

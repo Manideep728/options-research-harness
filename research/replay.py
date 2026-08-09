@@ -44,19 +44,19 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
+from bot import pricing
 from bot.broker import ClockInfo, Fill, OpenOrder
 from bot.config import Settings
 from bot.options import Contract
 from bot.risk import OpenPosition
-from bot.simulator import SimParams, gearing_of, option_return
+from bot.simulator import SimParams, option_return, premium_of
 from research.data import MARKET_TZ, SESSION_CLOSE, SESSION_OPEN, Bars, in_session
 
 log = logging.getLogger("research.replay")
 
-# Synthesized contracts sit one notch OTM and expire inside the live DTE
-# window, so bot.options.pick_contract's filters actually have work to do.
-OTM_PCT = 0.01
-DTE_DAYS = 10
+# How far OTM the synthesized contract sits, and how long it has to run, both
+# come from SimParams — the same numbers simulate() prices against. Keeping a
+# second copy here is how the replay and the backtest drift apart.
 OPEN_INTEREST = 5_000
 # Quoted spread as a fraction of mid. Must stay clear of the live gate's
 # max_spread_pct_of_mid (0.10) with room for rounding to cents: quoting exactly
@@ -119,7 +119,6 @@ class ReplayBroker:
         self.bars = {s: b for s, b in bars.items() if b[0]}
         self.cfg = cfg
         self.sp = sp
-        self.gearing = gearing_of(sp)
         self.start_equity = equity
         self.equity = equity
         self._day_open_equity = equity
@@ -190,13 +189,19 @@ class ReplayBroker:
         than being handed a free pass."""
         if px <= 0:
             return []
-        strike = round(px * (1 + OTM_PCT if want == "call" else 1 - OTM_PCT), 2)
-        mid = px * self.sp.premium_pct_of_spot
+        # Strike and mid both come from bot/pricing.py, so a quote here is the
+        # same contract at the same price simulate() would have used.
+        direction = 1.0 if want == "call" else -1.0
+        strike = pricing.strike_for(px, self.sp.otm_pct, want)
+        mid = premium_of(px, px, direction, 0.0, self.sp)
+        if mid <= 0:
+            return []
         half_spread = mid * SPREAD_PCT_OF_MID / 2.0
+        expiry = today + timedelta(days=int(self.sp.dte_days))
         return [Contract(
-            symbol=_occ_symbol(underlying, today + timedelta(days=DTE_DAYS), strike, want),
+            symbol=_occ_symbol(underlying, expiry, strike, want),
             underlying=underlying,
-            expiry=today + timedelta(days=DTE_DAYS),
+            expiry=expiry,
             strike=strike,
             call_put=want,
             bid=round(mid - half_spread, 2),
@@ -232,7 +237,7 @@ class ReplayBroker:
             return holding.entry_premium
         days = (self.now - holding.entry_time).total_seconds() / 86400
         ret = option_return(spot, holding.entry_spot, holding.direction, days,
-                            self.gearing, self.sp)
+                            self.sp)
         return max(0.0, holding.entry_premium * (1.0 + ret))
 
     # --- orders ---
