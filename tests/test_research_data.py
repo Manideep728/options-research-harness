@@ -183,6 +183,100 @@ def test_load_bars_rejects_unknown_kind(tmp_path: Path):
     raise AssertionError("load_bars must not reach the holdout directory")
 
 
+# --- full OHLC bars ---
+
+def _ohlc(n: int) -> data.OhlcBars:
+    _, times = _bars(n)
+    return data.OhlcBars(
+        times=times,
+        opens=[100.0 + i for i in range(n)],
+        highs=[100.5 + i for i in range(n)],
+        lows=[99.5 + i for i in range(n)],
+        closes=[100.2 + i for i in range(n)],
+        volumes=[1000.0 + i for i in range(n)],
+        has_intrabar=True,
+    )
+
+
+def test_take_selects_the_same_rows_from_every_column():
+    """Splitting and filtering pick rows. Applying the choice column by column
+    is how one series ends up offset from another."""
+    kept = _ohlc(6).take([0, 3, 5])
+    assert kept.closes == [100.2, 103.2, 105.2]
+    assert kept.highs == [100.5, 103.5, 105.5]
+    assert kept.lows == [99.5, 102.5, 104.5]
+    assert kept.volumes == [1000.0, 1003.0, 1005.0]
+    assert len(kept.times) == 3
+    assert kept.has_intrabar
+
+
+def test_ohlc_roundtrips_through_the_cache(tmp_path: Path):
+    bars = _ohlc(5)
+    data.save_ohlc(tmp_path / "daily" / "SPY.csv", bars)
+    loaded = data.load_ohlc("daily", "SPY", data_dir=tmp_path)
+    assert loaded.closes == bars.closes
+    assert loaded.highs == bars.highs
+    assert loaded.lows == bars.lows
+    assert loaded.volumes == bars.volumes
+    assert loaded.has_intrabar
+
+
+def test_close_only_cache_still_loads_and_says_it_has_no_intrabar(tmp_path: Path):
+    """The 9 MB cache on disk predates the open/high/low columns. It must keep
+    working, and a caller must be able to tell that its high and low are copies
+    of the close rather than a real range — otherwise intra-bar barrier logic
+    silently degrades back to close-only guessing."""
+    closes, times = _bars(4)
+    data.save_bars(tmp_path / "daily" / "SPY.csv", closes, times)
+    loaded = data.load_ohlc("daily", "SPY", data_dir=tmp_path)
+    assert loaded.closes == closes
+    assert loaded.highs == closes and loaded.lows == closes
+    assert not loaded.has_intrabar
+
+
+def test_load_bars_is_unchanged_by_the_ohlc_schema(tmp_path: Path):
+    """Every existing caller reads (closes, times) and must not notice."""
+    bars = _ohlc(5)
+    data.save_ohlc(tmp_path / "daily" / "SPY.csv", bars)
+    assert data.load_bars("daily", "SPY", data_dir=tmp_path) == (bars.closes, bars.times)
+
+
+def test_ohlc_loader_keeps_the_holdout_kind_guard(tmp_path: Path):
+    try:
+        data.load_ohlc("holdout", "SPY", data_dir=tmp_path)
+    except ValueError:
+        return
+    raise AssertionError("load_ohlc must not reach the holdout directory")
+
+
+def test_filter_ohlc_to_session_drops_whole_rows():
+    times = [_at("2026-01-05T13:00:00+00:00"),   # 08:00 ET — out
+             _at("2026-01-05T14:30:00+00:00"),   # 09:30 ET — in
+             _at("2026-01-05T22:45:00+00:00")]   # 17:45 ET — out
+    bars = data.OhlcBars(times=times, opens=[1.0, 2.0, 3.0], highs=[1.1, 2.1, 3.1],
+                         lows=[0.9, 1.9, 2.9], closes=[1.0, 2.0, 3.0],
+                         volumes=[10.0, 20.0, 30.0], has_intrabar=True)
+    kept = data.filter_ohlc_to_session(bars)
+    assert kept.closes == [2.0] and kept.highs == [2.1] and kept.lows == [1.9]
+
+
+def test_split_indices_agrees_with_split_at():
+    """split_at now delegates to split_indices. A divergence would move the
+    train/validation boundary without any test noticing."""
+    closes, times = _bars(100)
+    before, after = data.split_indices(times, cutoff=times[80], embargo=5)
+    (r_closes, _), (h_closes, _) = data.split_at(closes, times, times[80], embargo=5)
+    assert [closes[i] for i in before] == r_closes
+    assert [closes[i] for i in after] == h_closes
+
+
+def test_ohlc_before_cutoff_trims_every_column():
+    bars = _ohlc(10)
+    kept = data.ohlc_before(bars, cutoff=bars.times[6])
+    assert len(kept) == 6
+    assert kept.highs == bars.highs[:6]
+
+
 def test_holdout_loader_reads_only_holdout_dir(tmp_path: Path):
     closes, times = _bars(4)
     data.save_bars(tmp_path / "holdout" / "SPY.csv", closes, times)
