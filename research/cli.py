@@ -9,6 +9,12 @@ The intended cycle:
     replay -> run the REAL engine over cached bars, with every risk cap active
     robustness -> SimParams perturbation + daily regime check vs the null
     gate   -> the burn-once holdout verdict (refuses a burned window)
+
+Separate from that cycle:
+    vrp    -> is there a variance risk premium to harvest at all? Asked from
+              public data before any strategy exists, because the lesson of the
+              987 trials above is that searching inside an unvalidated
+              measurement layer finds the layer, not the market.
 """
 
 import argparse
@@ -32,6 +38,7 @@ from research import (
     replay,
     robustness,
     search,
+    vrp,
 )
 from research.families import FAMILIES
 
@@ -103,6 +110,15 @@ def main(argv: list[str] | None = None) -> int:
                              "candidate produces no trades on")
     sub.add_parser("robustness", help="perturbation + daily regime checks")
     sub.add_parser("gate", help="burn-once holdout verdict")
+
+    p_vrp = sub.add_parser(
+        "vrp", help="is implied vol above subsequent realized vol? (kill criterion)")
+    p_vrp.add_argument("--fetch", action="store_true",
+                       help="download CBOE indices + underlying dailies first")
+    p_vrp.add_argument("--years", type=int, default=12,
+                       help="years of underlying history to fetch")
+    p_vrp.add_argument("--roundtrip", type=float, default=vrp.DEFAULT_ROUNDTRIP,
+                       help="round-trip option cost as a fraction of premium")
 
     args = parser.parse_args(argv)
     cfg = Settings.load()
@@ -210,6 +226,63 @@ def main(argv: list[str] | None = None) -> int:
                       "max_positions, no max_trades_per_day, no cooldown, no "
                       "shortlist, no session window and no liquidity gate.")
         return 0
+
+    if args.command == "vrp":
+        if args.fetch:
+            if not cfg.api_key or not cfg.secret_key:
+                print("Alpaca keys required in .env to fetch the underlying bars")
+                return 1
+            data.fetch_vrp_inputs(cfg, years=args.years, data_dir=args.data_dir)
+
+        summaries = []
+        for name, symbol in data.VOL_INDEX_UNDERLYING.items():
+            implied = data.load_vol_index(name, args.data_dir)
+            under = data.load_vrp_bars(symbol, args.data_dir)
+            if not implied[0] or not under[0]:
+                print(f"{name}/{symbol}: no cached data — "
+                      "run `python -m research vrp --fetch`")
+                continue
+            summaries.append(vrp.summarize(name, symbol, implied[0], implied[1],
+                                           under[0], under[1]))
+        if not summaries:
+            return 1
+
+        print(f"\nvariance risk premium: implied vol minus the realized vol of the "
+              f"following {vrp.HORIZON_BARS} trading days, in vol points")
+        for s in summaries:
+            worst = s.worst
+            print(f"\n{s.name}/{s.symbol}: {s.n} overlapping days "
+                  f"({s.rows[0].day} .. {s.rows[-1].day}), "
+                  f"{len(s.independent)} independent cycles")
+            print(f"  mean implied         {s.mean_implied:6.2f}")
+            print(f"  mean VRP             {s.mean:+6.2f}   median {s.median:+.2f}"
+                  f"   positive on {s.share_positive:.1%} of days")
+            print(f"  cost hurdle          {s.hurdle(args.roundtrip):6.2f}   "
+                  f"(round trip {args.roundtrip:.0%} of premium)")
+            if worst is not None:
+                print(f"  worst single day     {worst.vrp:+6.2f}   "
+                      f"({worst.day}: implied {worst.implied:.1f} vs "
+                      f"realized {worst.realized:.1f})")
+            print(f"  max drawdown         {s.drawdown:6.2f}   "
+                  "(cumulative vol points, independent cycles)")
+            print("    by implied vol AT ENTRY:")
+            for label, count, mean, low in s.by_regime():
+                print(f"    {label:<9} n={count:<6} mean VRP {mean:+6.2f}   "
+                      f"worst {low:+7.2f}")
+            print(f"  -> {'CLEARS' if s.clears(args.roundtrip) else 'DOES NOT CLEAR'}"
+                  " the cost hurdle")
+
+        passed = all(s.clears(args.roundtrip) for s in summaries)
+        stressed = all(s.clears(0.06) for s in summaries)
+        print(f"\nverdict: {'PASS' if passed else 'FAIL'} at a "
+              f"{args.roundtrip:.0%} round trip; "
+              f"{'still passes' if stressed else 'FAILS'} at the 6% worst case "
+              "the live liquidity gate tolerates.")
+        # The premium being real is necessary, not sufficient: it says the
+        # effect exists, not that this bot could capture it after slippage,
+        # assignment and the tail that drawdown only gestures at.
+        print("A pass licenses building the option model — nothing more.")
+        return 0 if passed else 1
 
     candidate = _require_candidate(args.candidate)
     family = search.resolve_family(candidate)

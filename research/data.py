@@ -33,6 +33,7 @@ import logging
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from alpaca.data.enums import Adjustment, DataFeed
@@ -46,6 +47,9 @@ from bot.config import Settings
 log = logging.getLogger("research.data")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+
+# CBOE serves the index CSVs only to a browser-shaped request.
+USER_AGENT = "Mozilla/5.0 (compatible; trading-bot-research/1.0)"
 
 # Regular US equity session, in exchange-local time so DST is handled for us.
 MARKET_TZ = ZoneInfo("America/New_York")
@@ -197,6 +201,20 @@ def load_holdout_bars(symbol: str, data_dir: Path = DATA_DIR) -> Bars:
     return _read_bars(Path(data_dir) / "holdout" / f"{symbol}.csv", session_only=True)
 
 
+def load_vol_index(name: str, data_dir: Path = DATA_DIR) -> Bars:
+    """Cached CBOE volatility index history. Its own directory and loader so
+    load_bars' kind guard — the thing that keeps the holdout unreachable —
+    stays untouched."""
+    return _read_bars(Path(data_dir) / "volidx" / f"{name}.csv")
+
+
+def load_vrp_bars(symbol: str, data_dir: Path = DATA_DIR) -> Bars:
+    """Daily bars of a VRP underlying. Deliberately NOT the `daily/` cache:
+    that one is quarantined to end before the holdout window, while these run
+    to the present and must never be reachable from the regime check."""
+    return _read_bars(Path(data_dir) / "vrp" / f"{symbol}.csv")
+
+
 # --- fetching (the only network code in the research package) ---
 
 def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
@@ -254,16 +272,107 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
 
 
 def _fetch(client: StockHistoricalDataClient, symbol: str,
-           timeframe: TimeFrame, days: int) -> Bars:
+           timeframe: TimeFrame, days: int,
+           feed: DataFeed = DataFeed.IEX) -> Bars:
     start = datetime.now(UTC) - timedelta(days=days)
     bars = cast(BarSet, client.get_stock_bars(
         StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=timeframe,
             start=start,
-            feed=DataFeed.IEX,
+            feed=feed,
             # Without this, a 20:1 split reads as a -95% single-bar "move".
             adjustment=Adjustment.ALL,
         )
     )).data.get(symbol, [])
     return [float(b.close) for b in bars], [b.timestamp for b in bars]
+
+
+# --- CBOE volatility indices: the implied-vol side of the VRP test ---
+#
+# The variance risk premium IS implied minus subsequently realized volatility,
+# so it cannot be measured without real implied vol. bot/simulator.py has none
+# (premium is a flat 0.005 of spot), and synthesising it would assume the
+# answer. CBOE publishes each index's full daily history as a free CSV; the
+# value is annualized volatility in percentage points.
+#
+# Each index is mapped to the tradeable ETF whose realized vol it should be
+# compared against. VIX measures SPX, not SPY: the two differ by dividends,
+# which are small and smooth relative to volatility, so SPY realized vol is the
+# standard stand-in. That approximation is stated rather than hidden.
+VOL_INDEX_UNDERLYING: dict[str, str] = {"VIX": "SPY", "VXN": "QQQ", "RVX": "IWM"}
+CBOE_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{name}_History.csv"
+
+
+def parse_cboe_csv(text: str) -> Bars:
+    """Parse a CBOE daily-price CSV into (closes, times). Pure, so the parsing
+    rules are testable without touching the network.
+
+    Rows whose close is missing, unparseable, or non-positive are dropped: the
+    early history of some indices carries placeholder rows, and a 0.0 implied
+    vol would read as a huge variance risk premium rather than as missing data.
+    """
+    closes: list[float] = []
+    times: list[datetime] = []
+    for row in csv.DictReader(text.splitlines()):
+        raw_date, raw_close = (row.get("DATE") or "").strip(), (row.get("CLOSE") or "").strip()
+        if not raw_date or not raw_close:
+            continue
+        try:
+            stamp = datetime.strptime(raw_date, "%m/%d/%Y").replace(tzinfo=UTC)
+            close = float(raw_close)
+        except ValueError:
+            continue
+        if close <= 0:
+            continue
+        times.append(stamp)
+        closes.append(close)
+    return closes, times
+
+
+def fetch_vol_index(name: str) -> Bars:
+    """Download one CBOE volatility index's full daily history."""
+    request = Request(CBOE_URL.format(name=name), headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=60) as response:
+        text = response.read().decode("utf-8", "replace")
+    return parse_cboe_csv(text)
+
+
+def fetch_vrp_inputs(cfg: Settings, years: int = 12,
+                     data_dir: Path = DATA_DIR) -> dict[str, str]:
+    """Cache the implied/realized pair the VRP test needs: each CBOE index plus
+    the daily bars of the ETF it is compared against.
+
+    Uses the SIP feed rather than the IEX default. IEX daily history starts in
+    November 2018, which excludes the February 2018 volatility event; SIP starts
+    in January 2016 and covers it. A short-vol thesis is judged on exactly those
+    events, so the earlier coverage is the point. Over the range both feeds
+    cover, they agree bar for bar.
+
+    The underlying bars go to their own `vrp/` directory, NOT to `daily/`.
+    `daily/` was quarantined at fetch time to end before the holdout window, and
+    robustness.daily_regime_check reads it — overwriting it with history running
+    to today would push holdout prices into that check.
+
+    Returns {index name: underlying symbol} for the pairs that cached cleanly.
+    """
+    client = StockHistoricalDataClient(cfg.api_key, cfg.secret_key)
+    cached: dict[str, str] = {}
+    for name, symbol in VOL_INDEX_UNDERLYING.items():
+        implied = fetch_vol_index(name)
+        if not implied[0]:
+            log.warning("%s: no implied-vol history returned; skipping pair", name)
+            continue
+        underlying = _fetch(client, symbol, TimeFrame.Day, days=years * 365,
+                            feed=DataFeed.SIP)
+        if not underlying[0]:
+            log.warning("%s: no daily bars for %s; skipping pair", name, symbol)
+            continue
+        save_bars(Path(data_dir) / "volidx" / f"{name}.csv", *implied)
+        save_bars(Path(data_dir) / "vrp" / f"{symbol}.csv", *underlying)
+        cached[name] = symbol
+        log.info("%s/%s: %d implied (%s..%s), %d daily (%s..%s)",
+                 name, symbol,
+                 len(implied[0]), implied[1][0].date(), implied[1][-1].date(),
+                 len(underlying[0]), underlying[1][0].date(), underlying[1][-1].date())
+    return cached
