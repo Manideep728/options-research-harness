@@ -29,13 +29,14 @@ it exists to catch.
 import logging
 import math
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 from bot.config import Settings
 from bot.simulator import SimParams
 from bot.strategy import Action
-from research.data import Bars
+from research.data import Bars, OhlcBars
 from research.families import Family
 
 log = logging.getLogger("research.null")
@@ -145,24 +146,35 @@ def fire_rate_for(windows: dict[str, Bars], target_trades: int) -> float:
     return min(1.0, target_trades / bars)
 
 
-def null_distribution(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
-                      target_trades: int, seeds: int = DEFAULT_SEEDS) -> NullSummary:
+def null_distribution(windows: Mapping[str, "Bars | OhlcBars"], cfg: Settings,
+                      sp: SimParams, target_trades: int,
+                      seeds: int = DEFAULT_SEEDS,
+                      ivs: Mapping[str, list[float]] | None = None) -> NullSummary:
     """Run `seeds` independent coin flips over `windows` and collect one
     expectancy each. Seeds that produce no trades are dropped rather than
-    scored as 0.0, which would drag the threshold toward zero."""
+    scored as 0.0, which would drag the threshold toward zero.
+
+    `windows` may be (closes, times) pairs or full bars, and `ivs` may carry a
+    real implied volatility per symbol. Both are passed straight through to
+    run_family, because the control has to be measured with exactly the
+    machinery the candidate is measured with — a null priced differently from
+    the thing it benchmarks is not a control.
+    """
     # Local import: research.search imports this module to gate acceptance, so
     # a module-level import here would close the cycle. Same pattern as
     # search.resolve_family's local `blocks` import.
-    from research.search import run_family
+    from research.search import as_ohlc, run_family
 
-    fire_rate = fire_rate_for(windows, target_trades)
+    bar_counts = {s: as_ohlc(w).bars for s, w in windows.items()}
+    fire_rate = fire_rate_for(bar_counts, target_trades)
     if fire_rate <= 0:
         return NullSummary(expectancies=[], trades=[], fire_rate=0.0)
 
     expectancies: list[float] = []
     trades: list[int] = []
     for seed in range(seeds):
-        result = run_family(windows, cfg, sp, null_family(seed, fire_rate), {})
+        result = run_family(windows, cfg, sp, null_family(seed, fire_rate), {},
+                            ivs=ivs)
         if result.n == 0:
             continue
         expectancies.append(result.expectancy)

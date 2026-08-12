@@ -225,6 +225,59 @@ def ohlc_before_date(bars: OhlcBars, cutoff: datetime) -> OhlcBars:
                       if ts.astimezone(MARKET_TZ).date() < day])
 
 
+def split_all_ohlc(bars_by_symbol: dict[str, OhlcBars], fraction: float,
+                   embargo: int = EMBARGO_BARS
+                   ) -> tuple[dict[str, OhlcBars], dict[str, OhlcBars]]:
+    """split_all, keeping every column. One shared cutoff, as ever."""
+    cutoff = union_cutoff({s: b.times for s, b in bars_by_symbol.items()}, fraction)
+    if cutoff is None:
+        return {}, {}
+    before: dict[str, OhlcBars] = {}
+    after: dict[str, OhlcBars] = {}
+    for symbol, bars in bars_by_symbol.items():
+        i_before, i_after = split_indices(bars.times, cutoff, embargo)
+        before[symbol], after[symbol] = bars.take(i_before), bars.take(i_after)
+    return before, after
+
+
+def implied_vol_series(symbol: str, times: list[datetime],
+                       data_dir: Path = DATA_DIR) -> list[float] | None:
+    """Implied volatility for `symbol` on each of `times`, as a fraction.
+
+    None when the symbol has no volatility index of its own. That is not a
+    detail to paper over: pricing an option at a volatility the market never
+    quoted is what made a coin flip earn 10% per trade, so a caller with no
+    real series must know it is falling back to a constant.
+
+    The index is a daily close, so a value is carried forward to every bar of
+    the same day and to days the index did not publish. Carrying FORWARD only —
+    an intraday bar is priced with the volatility already known at the previous
+    close, never with one from later.
+    """
+    index = next((name for name, sym in VOL_INDEX_UNDERLYING.items()
+                  if sym == symbol), None)
+    if index is None:
+        return None
+    closes, index_times = load_vol_index(index, data_dir)
+    if not closes:
+        return None
+    by_day = {t.astimezone(MARKET_TZ).date(): c / 100.0
+              for t, c in zip(index_times, closes, strict=True)}
+    ordered = sorted(by_day)
+    out: list[float] = []
+    last: float | None = None
+    cursor = 0
+    for stamp in times:
+        day = stamp.astimezone(MARKET_TZ).date()
+        while cursor < len(ordered) and ordered[cursor] <= day:
+            last = by_day[ordered[cursor]]
+            cursor += 1
+        if last is None:
+            return None          # the series starts after these bars do
+        out.append(last)
+    return out
+
+
 def bars_before(closes: list[float], times: list[datetime],
                 cutoff: datetime) -> Bars:
     """Bars strictly before `cutoff` — used to quarantine the holdout
@@ -388,6 +441,11 @@ def load_vrp_bars(symbol: str, data_dir: Path = DATA_DIR) -> Bars:
     that one is quarantined to end before the holdout window, while these run
     to the present and must never be reachable from the regime check."""
     return _read_bars(Path(data_dir) / "vrp" / f"{symbol}.csv")
+
+
+def load_vrp_ohlc(symbol: str, data_dir: Path = DATA_DIR) -> OhlcBars:
+    """The same bars with every column, for the barrier test."""
+    return _read_ohlc(Path(data_dir) / "vrp" / f"{symbol}.csv")
 
 
 # --- fetching (the only network code in the research package) ---
@@ -566,16 +624,20 @@ def fetch_vrp_inputs(cfg: Settings, years: int = 12,
         if not implied[0]:
             log.warning("%s: no implied-vol history returned; skipping pair", name)
             continue
-        underlying = _fetch(client, symbol, TimeFrame.Day, days=years * 365,
-                            feed=DataFeed.SIP)
-        if not underlying[0]:
+        underlying = _fetch_ohlc(client, symbol, TimeFrame.Day, days=years * 365,
+                                 feed=DataFeed.SIP)
+        if not len(underlying):
             log.warning("%s: no daily bars for %s; skipping pair", name, symbol)
             continue
         save_bars(Path(data_dir) / "volidx" / f"{name}.csv", *implied)
-        save_bars(Path(data_dir) / "vrp" / f"{symbol}.csv", *underlying)
+        # Full bars: without a high and a low the barrier test cannot tell where
+        # price went inside a daily bar, and every exit books the whole
+        # close-to-close move.
+        save_ohlc(Path(data_dir) / "vrp" / f"{symbol}.csv", underlying)
         cached[name] = symbol
         log.info("%s/%s: %d implied (%s..%s), %d daily (%s..%s)",
                  name, symbol,
                  len(implied[0]), implied[1][0].date(), implied[1][-1].date(),
-                 len(underlying[0]), underlying[1][0].date(), underlying[1][-1].date())
+                 len(underlying), underlying.times[0].date(),
+                 underlying.times[-1].date())
     return cached
