@@ -81,8 +81,17 @@ class Engine:
                 log.info("%s: exit order already working", p.symbol)
                 continue
             if p.current_price <= 0:
-                log.warning("%s: no price; skipping exit check", p.symbol)
-                continue
+                # Worthless, not unknown. broker.get_option_positions() prices
+                # at the bid and falls back to Alpaca's mark, so reaching zero
+                # means neither a live bid NOR a broker mark exists — the
+                # contract is dead. This used to `continue`, which skipped
+                # exit_reason entirely, so the position was never closed and
+                # held one of max_positions slots until expiry (up to two
+                # weeks of the account's capacity, for nothing). Falling
+                # through gives pnl_pct = -100%, exit_reason returns the stop
+                # loss, and broker.close_option already market-closes when
+                # there is no bid.
+                log.warning("%s: no bid and no mark — treating as worthless", p.symbol)
             held_days = None
             entered = journal.entry_time(self.cfg.journal_file, p.symbol)
             if entered is not None:

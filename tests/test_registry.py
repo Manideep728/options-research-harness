@@ -1,8 +1,15 @@
-"""Trial registry: append-only log, unique counting, burn tracking."""
+"""Trial registry: append-only log, unique counting, burn tracking, and the
+dataset identity that stops stale scores being reused."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from research import registry
+
+
+def _win(symbol: str, first: str, last: str) -> dict:
+    return {symbol: ([1.0, 2.0], [datetime.fromisoformat(first).replace(tzinfo=UTC),
+                                  datetime.fromisoformat(last).replace(tzinfo=UTC)])}
 
 
 def test_trial_count_dedupes_same_candidate(tmp_path: Path):
@@ -71,3 +78,105 @@ def test_trial_key_matches_logged_key(tmp_path: Path):
     registry.log_trial(path, "fam", {"x": 3, "y": 4}, "train", {"sharpe": 0.1})
     logged_key = next(e["key"] for e in registry.entries(path))
     assert registry.trial_key("fam", {"x": 3, "y": 4}, "train") == logged_key
+
+
+# --- dataset identity ---
+
+def test_window_id_spans_all_symbols():
+    windows = {**_win("SPY", "2026-01-05T14:30", "2026-03-01T20:45"),
+               **_win("QQQ", "2026-01-02T14:30", "2026-03-05T20:45")}
+    assert registry.window_id(windows) == "2026-01-02..2026-03-05"
+
+
+def test_window_id_of_nothing_is_not_a_date_range():
+    assert registry.window_id({}) == "empty"
+    assert registry.window_id({"SPY": ([], [])}) == "empty"
+
+
+def test_same_params_on_a_different_dataset_is_a_different_trial(tmp_path: Path):
+    """THE bug this fixes. `fetch` moves the train/val boundaries, so the same
+    params on the window still called "train" are scored on different bars. The
+    key used to ignore that, and search.py reused the stale score."""
+    path = tmp_path / "trials.jsonl"
+    before = "2025-07-23..2026-03-01"
+    after = "2025-09-01..2026-05-01"
+    registry.log_trial(path, "baseline", {"a": 1}, "train", {"expectancy": 0.42},
+                       dataset=before)
+    registry.log_trial(path, "baseline", {"a": 1}, "train", {"expectancy": -0.09},
+                       dataset=after)
+    assert registry.trial_count(path) == 2
+    scores = registry.trial_scores(path)
+    assert scores[registry.trial_key("baseline", {"a": 1}, "train", before)][
+        "expectancy"] == 0.42
+    assert scores[registry.trial_key("baseline", {"a": 1}, "train", after)][
+        "expectancy"] == -0.09
+
+
+def test_dataset_qualified_key_never_collides_with_a_legacy_key(tmp_path: Path):
+    """Rows written before `dataset` existed must keep their keys — so they stay
+    countable in N — while never being reusable as a dataset-qualified score."""
+    path = tmp_path / "trials.jsonl"
+    registry.log_trial(path, "f", {"a": 1}, "train", {"expectancy": 0.5})
+    legacy_key = next(e["key"] for e in registry.entries(path))
+    assert registry.trial_key("f", {"a": 1}, "train") == legacy_key
+    assert registry.trial_key("f", {"a": 1}, "train", "2026-01-01..2026-02-01") != legacy_key
+
+
+def test_dataset_change_marker_is_recorded_without_touching_n(tmp_path: Path):
+    """N counts attempts that genuinely happened, so invalidating scores must
+    not shrink it — the marker is a note to readers, not a deletion."""
+    path = tmp_path / "trials.jsonl"
+    registry.log_trial(path, "f", {"a": 1}, "train", {"sharpe": 0.1})
+    registry.log_dataset_change(path, "session filter + split adjustment")
+    assert registry.trial_count(path) == 1
+    kinds = [e["kind"] for e in registry.entries(path)]
+    assert kinds == ["trial", "dataset_change"]
+
+
+def test_sharpe_spread_can_exclude_trials_from_a_replaced_model(tmp_path: Path):
+    """The spread describes the measuring instrument, so scores from a P&L
+    model that has been replaced must not widen it — while N still counts
+    them."""
+    path = tmp_path / "trials.jsonl"
+    for i, sharpe in enumerate([5.0, -5.0, 4.0]):
+        registry.log_trial(path, "old", {"a": i}, "train", {"sharpe": sharpe})
+    registry.log_dataset_change(path, "corrected P&L model")
+    for i, sharpe in enumerate([0.1, -0.1, 0.2]):
+        registry.log_trial(path, "new", {"a": i}, "train", {"sharpe": sharpe})
+
+    assert sorted(registry.trial_sharpes(path, since_dataset_change=True)) == \
+        [-0.1, 0.1, 0.2]
+    assert len(registry.trial_sharpes(path)) == 6
+    assert registry.trial_count(path) == 6
+
+
+def test_sharpe_spread_uses_the_most_recent_marker(tmp_path: Path):
+    path = tmp_path / "trials.jsonl"
+    registry.log_trial(path, "f", {"a": 0}, "train", {"sharpe": 9.0})
+    registry.log_dataset_change(path, "first")
+    registry.log_trial(path, "f", {"a": 1}, "train", {"sharpe": 7.0})
+    registry.log_dataset_change(path, "second")
+    for i, sharpe in enumerate([0.3, -0.3]):
+        registry.log_trial(path, "f", {"a": 10 + i}, "train", {"sharpe": sharpe})
+    assert sorted(registry.trial_sharpes(path, since_dataset_change=True)) == \
+        [-0.3, 0.3]
+
+
+def test_sharpe_spread_falls_back_when_the_slice_is_too_small(tmp_path: Path):
+    """One trial after the marker gives a zero variance, which collapses the
+    expected-max benchmark to zero and makes the gate EASIER. Prefer the stale
+    but populated estimate over no estimate at all."""
+    path = tmp_path / "trials.jsonl"
+    for i, sharpe in enumerate([0.5, -0.2, 0.4]):
+        registry.log_trial(path, "old", {"a": i}, "train", {"sharpe": sharpe})
+    registry.log_dataset_change(path, "corrected P&L model")
+    registry.log_trial(path, "new", {"a": 0}, "train", {"sharpe": 0.1})
+    assert len(registry.trial_sharpes(path, since_dataset_change=True)) == 4
+
+
+def test_sharpe_spread_without_any_marker_is_the_whole_history(tmp_path: Path):
+    path = tmp_path / "trials.jsonl"
+    for i, sharpe in enumerate([0.5, -0.2, 0.4]):
+        registry.log_trial(path, "f", {"a": i}, "train", {"sharpe": sharpe})
+    assert sorted(registry.trial_sharpes(path, since_dataset_change=True)) == \
+        sorted(registry.trial_sharpes(path))

@@ -50,7 +50,7 @@ def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
     if not holdout:
         return GateOutcome(False, False, "no holdout data cached", "", None, None)
 
-    window_id = _window_id(holdout)
+    window_id = registry.window_id(holdout)
     if registry.gate_burned(registry_path, window_id):
         return GateOutcome(
             True, False,
@@ -62,7 +62,18 @@ def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
     from dataclasses import replace
     result = run_family(holdout, replace(cfg, **exit_params), sp, family, signal_params)
     returns = [t.pnl_pct for t in result.trades]
-    dsr = metrics.deflated_sharpe(returns, registry.trial_sharpes(registry_path))
+    # Cluster by entry bar before any confidence claim: simultaneous trades
+    # across a correlated universe are one market move, and the gate's whole
+    # job is to not overstate how much evidence it has.
+    entry_bars = [t.entry_time for t in result.trades]
+    clustered = metrics.cluster_returns(returns, entry_bars)
+    # N counts every attempt ever made; the spread comes only from trials
+    # scored on the current measurement model. See metrics.deflated_sharpe.
+    dsr = metrics.deflated_sharpe(
+        clustered,
+        registry.trial_sharpes(registry_path, since_dataset_change=True),
+        n_trials=registry.trial_count(registry_path),
+    )
 
     if result.n < MIN_TRADES:
         passed, reason = False, f"too few holdout trades ({result.n} < {MIN_TRADES})"
@@ -72,21 +83,16 @@ def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
         passed, reason = False, (
             f"deflated Sharpe confidence {dsr:.3f} < {DSR_CONFIDENCE} — "
             "indistinguishable from the luckiest of "
-            f"{registry.trial_count(registry_path)} trials"
+            f"{registry.trial_count(registry_path)} trials "
+            f"({len(clustered)} independent entry bars behind {result.n} trades)"
         )
     else:
         passed, reason = True, "passed the out-of-sample gate"
 
-    scores = metrics.summarize(returns)
+    scores = metrics.summarize(returns, entry_bars)
     scores["deflated_sharpe"] = round(dsr, 4)
     registry.log_gate(registry_path, candidate["family"],
                       {**signal_params, **exit_params}, window_id, scores, passed)
     log.info("gate %s: %s (window %s now burned)",
              "PASSED" if passed else "FAILED", reason, window_id)
     return GateOutcome(False, passed, reason, window_id, result, dsr)
-
-
-def _window_id(holdout: dict) -> str:
-    starts = [times[0] for _, times in holdout.values()]
-    ends = [times[-1] for _, times in holdout.values()]
-    return f"{min(starts).date().isoformat()}..{max(ends).date().isoformat()}"

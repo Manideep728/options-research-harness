@@ -6,20 +6,62 @@ statistical claim the research loop makes (the deflated Sharpe ratio is
 forgotten, N shrinks and every result looks better than it is. So: one
 JSONL file, append-only, and holdout-gate attempts are recorded here too —
 that record is what makes the gate burn-once.
+
+A trial's identity includes the DATASET it was scored on, not just the window
+name. It used to be keyed on the literal string "train", which meant a score
+survived `python -m research fetch` moving the train/val boundaries — so the
+searcher would reuse a number computed on different bars and never notice. The
+gate always got this right (it keys on the holdout's date range); trials did
+not. `dataset` is omitted from the hash when empty so rows written before this
+existed keep their keys and stay countable in N.
 """
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 DEFAULT_PATH = Path(__file__).resolve().parent / "trials.jsonl"
 
+# Either shape the searcher may hold: a (closes, times) pair or full bars.
+Windows = Mapping[str, Any]
 
-def _key(family: str, params: dict, window: str) -> str:
-    canonical = json.dumps({"family": family, "params": params, "window": window},
-                           sort_keys=True)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+def _times_of(window: object) -> list:
+    """Timestamps from either a (closes, times) pair or full OhlcBars.
+
+    Both shapes reach here now that the searcher passes full bars, and the
+    dataset identity must not depend on which one a caller happens to hold —
+    the same bars under two shapes have to hash to the same window.
+    """
+    stamps = getattr(window, "times", None)
+    if stamps is not None:
+        return list(stamps)
+    return list(window[1])          # type: ignore[index]
+
+
+def window_id(windows: Windows) -> str:
+    """Calendar identity of a dataset: earliest..latest bar date across all
+    symbols. Two windows with the same name but different dates are different
+    datasets, and a score from one says nothing about the other."""
+    all_times = [t for w in windows.values() if (t := _times_of(w))]
+    if not all_times:
+        return "empty"
+    starts = [t[0] for t in all_times]
+    ends = [t[-1] for t in all_times]
+    return f"{min(starts).date().isoformat()}..{max(ends).date().isoformat()}"
+
+
+def _key(family: str, params: dict, window: str, dataset: str = "") -> str:
+    payload: dict = {"family": family, "params": params, "window": window}
+    if dataset:
+        # Conditional so pre-dataset rows hash identically to how they were
+        # written. Their keys stay valid; they simply can never collide with a
+        # dataset-qualified key, which is precisely the stale-reuse fix.
+        payload["dataset"] = dataset
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _append(path: Path, entry: dict) -> None:
@@ -46,14 +88,27 @@ def entries(path: Path = DEFAULT_PATH) -> list[dict]:
 
 
 def log_trial(path: Path, family: str, params: dict, window: str,
-              scores: dict) -> None:
+              scores: dict, dataset: str = "") -> None:
     _append(Path(path), {
         "kind": "trial",
-        "key": _key(family, params, window),
+        "key": _key(family, params, window, dataset),
         "family": family,
         "params": params,
         "window": window,
+        "dataset": dataset,
         "scores": scores,
+        "at": datetime.now(UTC).isoformat(),
+    })
+
+
+def log_dataset_change(path: Path, reason: str, dataset: str = "") -> None:
+    """Record that prior scores are no longer comparable. Nothing is deleted —
+    a reader that finds this row knows to distrust trials logged before it,
+    while N keeps counting every attempt that genuinely happened."""
+    _append(Path(path), {
+        "kind": "dataset_change",
+        "reason": reason,
+        "dataset": dataset,
         "at": datetime.now(UTC).isoformat(),
     })
 
@@ -95,16 +150,42 @@ def trial_scores(path: Path = DEFAULT_PATH) -> dict[str, dict]:
     return out
 
 
-def trial_key(family: str, params: dict, window: str) -> str:
+def trial_key(family: str, params: dict, window: str, dataset: str = "") -> str:
     """Public accessor for the identity hash, so callers key into
     trial_scores() with exactly the same hash log_trial() will write."""
-    return _key(family, params, window)
+    return _key(family, params, window, dataset)
 
 
-def trial_sharpes(path: Path = DEFAULT_PATH) -> list[float]:
-    """Sharpe of each unique trial — the spread feeds expected_max_sharpe."""
+def trial_sharpes(path: Path = DEFAULT_PATH,
+                  since_dataset_change: bool = False) -> list[float]:
+    """Sharpe of each unique trial — the spread feeds expected_max_sharpe.
+
+    `since_dataset_change` keeps only trials logged after the most recent
+    dataset_change row. The spread of trial Sharpes describes the measuring
+    instrument, so it has to come from one instrument: pooling scores from a
+    P&L model that no longer exists corrupts the benchmark's scale by an
+    unknown amount in an unknown direction. N is a separate argument and still
+    counts every attempt — see metrics.deflated_sharpe.
+
+    Falls back to the whole history when the slice holds fewer than two
+    trials, because no variance estimate at all collapses the benchmark to
+    zero and makes the gate easier. A stale estimate is wrong; no estimate is
+    unsafe.
+    """
+    rows = entries(path)
+    if since_dataset_change:
+        marks = [i for i, e in enumerate(rows)
+                 if e.get("kind") == "dataset_change"]
+        if marks:
+            recent = _unique_sharpes(rows[marks[-1] + 1:])
+            if len(recent) >= 2:
+                return recent
+    return _unique_sharpes(rows)
+
+
+def _unique_sharpes(rows: list[dict]) -> list[float]:
     seen: dict[str, float] = {}
-    for e in entries(path):
+    for e in rows:
         if e.get("kind") != "trial":
             continue
         sharpe = e.get("scores", {}).get("sharpe")
