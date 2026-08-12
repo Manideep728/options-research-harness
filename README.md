@@ -8,7 +8,9 @@ searched 986 strategy configurations, reported plausible numbers for all of
 them, and every one of those numbers was wrong — because of four lines in the
 simulator's exit loop.
 
-This README leads with that bug, because finding it is the work.
+This README leads with that bug, because finding it is the work. The second half
+is what came after: a pre-registered test of a documented market effect, which
+the harness also rejected — for a reason worth reading.
 
 ## The bug
 
@@ -160,6 +162,135 @@ demonstrated edge** — four completed round trips on the paper account, all fou
 losers, −$600 realized. The risk caps exist to contain the damage while evidence
 accumulates.
 
+## The second attempt: sell the variance risk premium
+
+The audit above corrected the measurement. It did not supply a strategy. So the
+next question was whether the signal had any forecast power at all, independent
+of the P&L model. Measure the direction-adjusted move of the UNDERLYING after
+every signal, and no option pricing is involved:
+
+| horizon after the signal | baseline | donchian | rsi_only |
+|---|---:|---:|---:|
+| 15 minutes | +0.003% | −0.005% | −0.004% |
+| 1 hour | −0.020% | −0.017% | −0.007% |
+| 1 day | −0.136% | −0.091% | −0.046% |
+| 32 hours | −0.724% | −0.448% | −0.282% |
+
+Zero or negative at every horizon, on 154,000 bars. Decomposing the P&L per
+trade agrees: the directional term is **−0.02%**, theta is −1.77%, and the round
+trip is −3.00%. No exit rule, leverage level, or holding period repairs a signal
+that forecasts nothing. Tuning was therefore the wrong response.
+
+The bot buys options. It is on the losing side of the best documented effect in
+its own market: **implied volatility usually exceeds the volatility that then
+occurs, and option sellers collect the difference.** The remaining work tests
+that effect, with a kill criterion registered before any result existed.
+
+### Step 1 — does the premium exist here?
+
+No bot code was written for this step, because the previous failure was building
+machinery before measuring the effect. `research/vrp.py` needs two public series
+and prices nothing.
+
+```powershell
+.venv\Scripts\python -m research vrp
+```
+```
+VIX/SPY: 2645 overlapping days (2016-01-04 .. 2026-07-13), 126 independent cycles
+  mean implied          18.53
+  mean VRP              +3.79   median +4.71   positive on 84.3% of days
+  cost hurdle            0.56   (round trip 3% of premium)
+  worst single day     -63.39   (2020-02-20: implied 15.6 vs realized 79.0)
+  max drawdown          64.33   (cumulative vol points, independent cycles)
+  -> CLEARS the cost hurdle
+```
+
+The premium is 6.8 times the cost of collecting it, and it survives the 6% round
+trip that the live liquidity gate tolerates. It is also collected in calm
+markets and lost in one event: the worst single observation is 17 times the
+mean, and it starts from an implied volatility of 15.6, which is the calm third
+of the sample. The tail is the whole risk.
+
+Note the two measurements that are separate on purpose. Drawdown uses
+**non-overlapping** cycles, because consecutive daily rows share 20 of their 21
+forward days — one crash smeared across 21 rows flatters every drawdown, and a
+short-volatility strategy is judged on exactly that.
+
+### Step 2 — three defects that made the ruler unusable for this
+
+A coin flip must lose money. On short premium it must instead **earn the
+premium**, so the null changes meaning: a positive null is the effect, and the
+candidate has to beat it. That only works if the pricing is real.
+
+**Linear pricing.** The simulator approximated the option return from a fixed
+delta and a fixed premium. `bot/pricing.py` now prices with Black-Scholes from
+(spot, strike, time, volatility, rate). The real premium is 0.93% of spot, not
+the 0.5% assumed, so the true gearing is **43×, not 80×**.
+
+**Closes only.** `research/data.py` stored `close` and discarded open, high, and
+low. A barrier exit was therefore inferred from a close, which is what produced
+the overshoot. Bars now carry every column, and the adverse extreme is tested
+first when one bar touches both barriers.
+
+**No implied volatility.** Every option was priced at a flat 20%. VIX, VXN, and
+RVX supply a real daily series for SPY, QQQ, and IWM.
+
+Each input alone left the coin flip profitable. Both were required:
+
+| window | closes only | full bars + real IV |
+|---|---:|---:|
+| SPY/QQQ/IWM daily | −9.83% | **−12.61%** |
+| 30 symbols, daily | **+12.55%** | **−5.96%** |
+| 30 symbols, intraday | **+1.86%** | **−1.99%** |
+
+**Short positions also needed a denominator.** A seller's maximum loss is not
+the premium. The model therefore trades **defined-risk credit spreads** only —
+short one strike, long a further one — so the loss is bounded and known, and
+every return is a fraction of capital at risk. Naked short options cannot be
+represented. `research/robustness.py` gained a tail check on worst trade and
+maximum drawdown, because expectancy cannot judge a short-volatility book.
+
+### Step 3 — the verdict
+
+Three entry rules were tested against the same control, on the same bars.
+
+| rule | validation expectancy | percentile of its own null | verdict |
+|---|---:|---:|---|
+| sell on every bar (passive) | +1.54% | 81.0 | **REJECTED** |
+| sell when IV rank is high | −1.01% | 7.0 | **REJECTED** |
+| sell when IV exceeds trailing realized vol | +1.19% | 69.5 | **REJECTED** |
+
+**The control is positive, and that is the finding.** A coin flip that sells
+premium with random timing earns **+0.70% to +0.82% per trade**. The premium is
+real, it survives costs, and passive collection captures it — but no timing rule
+tested here is distinguishable from random timing. That is what theory predicts
+for a risk premium rather than a mispricing: the seller is paid for holding a
+risk, not for knowing something.
+
+The first result of the three was **ACCEPTED** until the control was corrected.
+The coin flip was still BUYING options, which loses 9.81% per trade, so any
+seller cleared that bar without an edge. A control must trade the same structure
+as the candidate; `null.null_family` now takes the action pair as an argument.
+That change alone moved the passive family from ACCEPTED to REJECTED.
+
+The IV-rank rule inverted, and the reason is instructive. It sells when implied
+volatility is at the top of its own range, which is when realized volatility has
+already overtaken it — it sells into a fall in progress. It was built on the
+regime table above, where the stressed third pays +5.06 against the calm third's
++2.56. That table rests on one crash. It did not survive contact with a trading
+rule.
+
+The third rule was written to invert that error: compare implied against the
+volatility the underlying is actually delivering, so the same crash that
+maximizes IV rank makes this rule stand down. The search was free to demand a
+rich premium and **selected the lowest threshold in the grid** (`vrp_min = 0.0`),
+which is the setting closest to no filter at all. Every filter subtracted.
+
+`research/candidate.json` held the wrongly-accepted passive candidate, stamped
+with the old control's numbers. Running `gate` would have spent the burn-once
+holdout on a candidate that is in fact rejected. The file was deleted, and the
+holdout is still sealed.
+
 ## One broker interface, two implementations
 
 There was a second problem, structural rather than arithmetic: **the backtest
@@ -283,6 +414,7 @@ flowchart LR
     api -. "start / stop main.py" .-> engine
 
     subgraph research["Research loop (offline — never imported by the bot)"]
+        vrpmod["vrp.py<br/>does the effect exist? (kill criterion)"]
         search["search.py<br/>train-only grid search"]
         nullmod["null.py<br/>coin-flip control"]
         replaymod["replay.py<br/>ReplayBroker"]
@@ -290,6 +422,7 @@ flowchart LR
         proposer["proposer.py<br/>LLM strategy specs (JSON, never code)"]
         proposer --> search --> gate
         nullmod --> search
+        vrpmod -. "licenses the attempt" .-> search
     end
     replaymod -. "same 11-method interface as broker.py" .-> engine
     gate -. "evidence for manual review" .-> tuned
@@ -408,8 +541,9 @@ controls:
 ```
 
 The backtester replays the exact live signal rules over historical bars with
-an explicit option-P&L approximation (delta gearing, theta decay, spread
-costs — constants in `bot/simulator.py`). `--tune` grid-searches the signal
+an explicit option-P&L model — Black-Scholes in `bot/pricing.py`, driven by the
+implied volatility, days to expiry, and round-trip cost in `SimParams`.
+`--tune` grid-searches the signal
 and exit parameters under **hard guidelines** (`bot/tuner.py`):
 
 1. Risk caps are not in the search space at all.
@@ -448,6 +582,7 @@ never imports it). The cycle:
 
 ```powershell
 .venv\Scripts\python -m research fetch            # cache bars once; splits off a quarantined holdout
+.venv\Scripts\python -m research vrp              # does the effect exist? the pre-registered kill criterion
 .venv\Scripts\python -m research search --family baseline   # select on TRAIN, judge on validation
 .venv\Scripts\python -m research report           # failure analysis of train trades (you read this)
 .venv\Scripts\python -m research null             # what a coin flip earns on the same bars
@@ -461,6 +596,9 @@ never imports it). The cycle:
 | Guard | The failure it prevents |
 |---|---|
 | **Coin-flip null** | A guard that only asks `expectancy > 0` passes a random signal whenever the P&L model is broken. This is the one that caught everything above. |
+| **Structure-matched control** | A control that BUYS options while the candidate SELLS them measures the cost of buying, not the skill of the candidate. This moved a short-premium family from ACCEPTED to REJECTED. |
+| **Pre-registered kill criterion** | The threshold for "the effect exists" is written down before the measurement runs, so it cannot be adjusted to fit the result. |
+| **Tail check** | Expectancy cannot judge a short-volatility book: it wins small and often and loses large and rarely, so a sound book and a doomed one look identical on the average. Worst trade and maximum drawdown are separate pass/fail criteria. |
 | **Committed trial registry** | A local-only log resets `N` to 0 on a fresh clone, and every result silently looks better than it is. |
 | **Dataset-keyed trial identity** | A score keyed on the string `"train"` survives `fetch` moving the split boundaries, so the searcher reuses a number computed on different bars. |
 | **Deflated Sharpe ratio** | Scores a result against *the best of N tries*, so the luckiest of 986 stops reading as skill. |
@@ -471,7 +609,8 @@ never imports it). The cycle:
 | **No auto-deploy, ever** | A gate pass prints evidence for human review. Risk caps are in no search space. |
 
 Families: `baseline` (live EMA+RSI), `ema_slope`, `donchian`, `rsi_only`
-(control). Honesty machinery: every candidate ever scored is logged to an
+(control), and three short-premium families — `short_put_passive` (the
+benchmark), `short_put_iv_rank`, and `short_put_vrp_spread`. Honesty machinery: every candidate ever scored is logged to an
 append-only `research/trials.jsonl` — **committed to git**, because that trial
 count is the denominator of every honest claim the loop makes (a local-only
 registry would reset N to 0 on a fresh clone and make every result look better
@@ -532,7 +671,7 @@ The gate stays human-invoked and burn-once regardless of who proposed.
 ## Tests & quality gates
 
 ```powershell
-.venv\Scripts\python -m pytest tests -q   # 247 tests
+.venv\Scripts\python -m pytest tests -q   # 374 tests
 .venv\Scripts\python -m ruff check .      # lint
 .venv\Scripts\python -m mypy              # type check
 cd web; npm run lint; npm run build       # frontend
@@ -547,6 +686,13 @@ The tests worth reading first are the ones that pin the findings above:
   −0.51 and −1.00 where it now books −0.25 twice.
 - `test_regime_guard_rejects_a_coin_flip` — a zero-skill signal must not pass the
   multi-regime check. This is the regression test for the whole audit.
+- `test_tail_check_fails_a_book_that_looks_fine_on_average` — 200 wins at +5% and
+  one −900% loss. Expectancy says the book is profitable; the tail check fails it.
+- `test_vrp_spread_stands_down_in_the_crash_that_iv_rank_leans_into` — the two
+  short-premium entry rules must disagree on the case that separates them.
+- `test_max_loss_is_a_true_bound_at_every_cost_level` — parametrized over four
+  cost levels and both structures. A spread that loses more than its stated
+  bound is not defined-risk, and the first version lost 102% of it.
 - `test_get_closes_never_returns_a_bar_at_or_after_now` — the replay causality
   contract, checked at every step rather than once.
 - `test_positions_reprice_through_the_shared_option_model` — replay must not grow
@@ -586,6 +732,7 @@ bot/earnings.py    earnings blackout gate + earnings.json loader
 bot/options.py     contract selection + liquidity gates (pure)
 bot/risk.py        entry gates, sizing, exit rules incl. max hold (pure)
 bot/simulator.py   fast backtest engine + THE option P&L model (pure)
+bot/pricing.py     Black-Scholes price, delta, vega, and credit-spread value (pure)
 bot/tuner.py       guarded grid search + one chronological train/val split
 bot/journal.py     trades.csv fill journal, FIFO realized P&L
 bot/state.py       daily counters persisted to state.json
@@ -598,7 +745,8 @@ dashboard_api.py   FastAPI backend for the web dashboard; also starts/stops main
 run_dashboard.py   launches API + web frontend together (Python-side alternative to npm run dev)
 
 research/data.py       bar cache, session filter, train/val/holdout splits + embargo
-research/families.py   built-in strategy families (baseline, ema_slope, donchian, rsi_only)
+research/vrp.py        the variance risk premium: implied vs subsequent realized vol
+research/families.py   built-in strategy families (directional + short premium)
 research/blocks.py     the fixed block vocabulary an LLM proposal may combine
 research/search.py     select-on-train grid search, registry-aware, null-gated
 research/null.py       the coin-flip control every candidate is measured against
