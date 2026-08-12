@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from bot.indicators import ema, rsi
 from bot.strategy import Action
+from research import vrp
 
 RSI_PERIOD = 14  # fixed, as in the live bot
 
@@ -200,6 +201,55 @@ def iv_rank_short_put_spread(closes: list[float], times, p: dict,
     return out
 
 
+def trailing_realized_vol(closes: list[float], i: int, lookback: int) -> float | None:
+    """Realized volatility of the last `lookback` bars, as a fraction.
+
+    Causal: it ends at bar i and uses no return dated after it. The shared
+    implementation in research.vrp reports percentage points, because that is
+    the unit VIX is quoted in; implied volatility reaches the simulator as a
+    fraction, so it is divided here rather than measured twice.
+    """
+    if i < lookback:
+        return None
+    return vrp.realized_vol(closes[i - lookback:i + 1]) / 100.0
+
+
+def vrp_spread_short_put_spread(closes: list[float], times, p: dict,
+                                ivs: list[float] | None = None) -> list[Action]:
+    """Sell a put spread only when implied volatility exceeds the volatility the
+    underlying is ACTUALLY delivering, by at least `vrp_min`.
+
+    This is the third entry rule tried, and it is deliberately not a variation
+    of the second. IV rank asks "is implied high for this symbol", which fires
+    hardest during a crash — implied is at the top of its range precisely when
+    realized has already overtaken it, so the rule sold into a fall in progress
+    and lost 1.01% per trade against the passive harvest's +1.49%.
+
+    This rule asks the different question that Session 1 actually measured: are
+    options expensive RELATIVE TO WHAT THE UNDERLYING IS DOING. The same crash
+    that maximises IV rank collapses this spread toward zero or below, so the
+    rule stands down exactly where the previous one leant in.
+
+    The known weakness, stated rather than discovered later: trailing realized
+    volatility is a backward-looking stand-in for the forward realized vol the
+    premium is actually paid against, and the two come apart at every regime
+    turn. If this rule works it works because volatility is persistent, not
+    because it forecasts anything.
+    """
+    n = len(closes)
+    if ivs is None or len(ivs) != n:
+        # Same reason as iv_rank_short_put_spread: with no implied volatility
+        # this would quietly become the passive family under another name.
+        return _none_series(n)
+    lookback, floor = int(p["rv_lookback"]), float(p["vrp_min"])
+    out = _none_series(n)
+    for i in range(n):
+        realized = trailing_realized_vol(closes, i, lookback)
+        if realized is not None and ivs[i] - realized >= floor:
+            out[i] = Action.SELL_PUT_SPREAD
+    return out
+
+
 # Exits for a credit spread, as fractions of CAPITAL AT RISK. The best case is
 # the credit divided by the risk — about +19% on a 5%-wide spread — so the live
 # bot's +50% target is unreachable and its bounds do not apply. Taking roughly
@@ -279,6 +329,22 @@ FAMILIES: dict[str, Family] = {
             "iv_rank_min": [0.4, 0.6, 0.8],
         },
         bounds={"iv_lookback": (20, 504), "iv_rank_min": (0.0, 0.95)},
+        exit_grid=CREDIT_EXIT_GRID,
+        exit_bounds=CREDIT_EXIT_BOUNDS,
+        needs_iv=True,
+        dataset="vrp",
+        baseline_family="short_put_passive",
+        credit=True,
+    ),
+    "short_put_vrp_spread": Family(
+        name="short_put_vrp_spread",
+        description="sell a put spread only when implied vol exceeds trailing realized vol",
+        signal=vrp_spread_short_put_spread,
+        grid={
+            "rv_lookback": [10, 21, 42],
+            "vrp_min": [0.0, 0.02, 0.05],
+        },
+        bounds={"rv_lookback": (5, 120), "vrp_min": (-0.10, 0.20)},
         exit_grid=CREDIT_EXIT_GRID,
         exit_bounds=CREDIT_EXIT_BOUNDS,
         needs_iv=True,
