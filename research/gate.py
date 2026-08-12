@@ -67,7 +67,13 @@ def run_gate(candidate: dict, cfg: Settings, sp: SimParams = SimParams(),
     # job is to not overstate how much evidence it has.
     entry_bars = [t.entry_time for t in result.trades]
     clustered = metrics.cluster_returns(returns, entry_bars)
-    dsr = metrics.deflated_sharpe(clustered, registry.trial_sharpes(registry_path))
+    # N counts every attempt ever made; the spread comes only from trials
+    # scored on the current measurement model. See metrics.deflated_sharpe.
+    dsr = metrics.deflated_sharpe(
+        clustered,
+        registry.trial_sharpes(registry_path, since_dataset_change=True),
+        n_trials=registry.trial_count(registry_path),
+    )
 
     if result.n < MIN_TRADES:
         passed, reason = False, f"too few holdout trades ({result.n} < {MIN_TRADES})"

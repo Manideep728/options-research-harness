@@ -156,10 +156,36 @@ def trial_key(family: str, params: dict, window: str, dataset: str = "") -> str:
     return _key(family, params, window, dataset)
 
 
-def trial_sharpes(path: Path = DEFAULT_PATH) -> list[float]:
-    """Sharpe of each unique trial — the spread feeds expected_max_sharpe."""
+def trial_sharpes(path: Path = DEFAULT_PATH,
+                  since_dataset_change: bool = False) -> list[float]:
+    """Sharpe of each unique trial — the spread feeds expected_max_sharpe.
+
+    `since_dataset_change` keeps only trials logged after the most recent
+    dataset_change row. The spread of trial Sharpes describes the measuring
+    instrument, so it has to come from one instrument: pooling scores from a
+    P&L model that no longer exists corrupts the benchmark's scale by an
+    unknown amount in an unknown direction. N is a separate argument and still
+    counts every attempt — see metrics.deflated_sharpe.
+
+    Falls back to the whole history when the slice holds fewer than two
+    trials, because no variance estimate at all collapses the benchmark to
+    zero and makes the gate easier. A stale estimate is wrong; no estimate is
+    unsafe.
+    """
+    rows = entries(path)
+    if since_dataset_change:
+        marks = [i for i, e in enumerate(rows)
+                 if e.get("kind") == "dataset_change"]
+        if marks:
+            recent = _unique_sharpes(rows[marks[-1] + 1:])
+            if len(recent) >= 2:
+                return recent
+    return _unique_sharpes(rows)
+
+
+def _unique_sharpes(rows: list[dict]) -> list[float]:
     seen: dict[str, float] = {}
-    for e in entries(path):
+    for e in rows:
         if e.get("kind") != "trial":
             continue
         sharpe = e.get("scores", {}).get("sharpe")

@@ -156,6 +156,15 @@ one of the 986 logged trials remains committed and counted in `N`, because those
 attempts genuinely happened; they are marked non-comparable by a
 `dataset_change` row rather than deleted.
 
+The deflated Sharpe reads its two inputs from two different places, for this
+reason. `N` counts every attempt, including the 986, because each one was a
+chance to get lucky. The spread of trial Sharpes comes only from trials logged
+after the most recent `dataset_change` row, because that spread describes the
+measuring instrument and must come from one instrument. If fewer than two
+trials follow the marker, the spread falls back to the full history: a stale
+estimate is wrong, but no estimate at all sets the benchmark to zero and makes
+the gate easier.
+
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
 endpoint. Nothing here is financial advice, and the live strategy has **no
 demonstrated edge** — four completed round trips on the paper account, all four

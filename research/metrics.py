@@ -102,11 +102,22 @@ def probabilistic_sharpe(returns: list[float], benchmark_sr: float) -> float:
     return _NORMAL.cdf((sr - benchmark_sr) * math.sqrt(n - 1) / denom)
 
 
-def deflated_sharpe(returns: list[float], trial_sharpes: list[float]) -> float:
+def deflated_sharpe(returns: list[float], trial_sharpes: list[float],
+                    n_trials: int | None = None) -> float:
     """PSR against the expected-max-Sharpe of everything ever tried.
-    > 0.95 means: fewer than 5% odds this is just the luckiest of N tries."""
-    if len(trial_sharpes) >= 2:
-        benchmark = expected_max_sharpe(len(trial_sharpes), pvariance(trial_sharpes))
+    > 0.95 means: fewer than 5% odds this is just the luckiest of N tries.
+
+    The benchmark has two independent inputs and they come from different
+    places. N is how many attempts happened, including attempts scored on a
+    measurement model that has since been replaced — those were still chances
+    to get lucky. `trial_sharpes` estimates how much a Sharpe varies between
+    candidates, which is a property of the current model only. Pass `n_trials`
+    to keep the count honest while the spread stays comparable; it defaults to
+    len(trial_sharpes) for callers that want both from the same list.
+    """
+    n = len(trial_sharpes) if n_trials is None else n_trials
+    if len(trial_sharpes) >= 2 and n >= 2:
+        benchmark = expected_max_sharpe(n, pvariance(trial_sharpes))
     else:
         benchmark = 0.0
     return probabilistic_sharpe(returns, benchmark)
