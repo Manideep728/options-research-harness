@@ -10,11 +10,17 @@ bot.log
 bot.log.*
 earnings.json
 engine.pid
+# Written by `backtest.py --tune` when a tune is ACCEPTED, and read by the bot
+# on start. Not committed: a checked-in copy applies one machine's tune result
+# to every clone, and its evidence goes stale as soon as the P&L model changes.
+tuned_params.json
 .pytest_cache/
 web/.next/
 web/node_modules/
 # Personal learning notes, not project documentation — kept local.
 QUESTIONS.md
+INTERVIEW_PREP.md
+BUGS_AND_FINDINGS.md
 .claude/scheduled_tasks.lock
 # Research data cache: large, re-fetchable from Alpaca; never committed.
 research/data/
