@@ -21,7 +21,9 @@ Two data-hygiene rules that are not optional, both of which were violated:
 
 2. Bars are split/dividend adjusted. Unadjusted history put a -95.1% single
    "day" in GOOGL (its 20:1 split), -94.9% in AMZN, -90.1% in NFLX and -89.9%
-   in NVDA. At the simulator's 80x gearing a put "earns" +7,600% on that.
+   in NVDA. At the 80x gearing the simulator used at the time, a put "earned"
+   +7,600% on that. The pricing is Black-Scholes now and the gearing is near
+   43x, which reduces the number but does not make an unadjusted split safe.
 
 Note that the session filter applies to INTRADAY ONLY. Alpaca stamps daily
 bars at 00:00 ET (04:00/05:00 UTC), so filtering them by time-of-day would
