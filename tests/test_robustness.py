@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from bot.config import Settings
 from bot.simulator import SimParams
 from research import data, robustness
@@ -64,3 +66,49 @@ def test_daily_regime_check_groups_by_year(tmp_path):
         {"rsi_bull_level": 40.0, "rsi_bear_level": 60.0}, data_dir=tmp_path)
     years = [r.label for r in rows]
     assert years == sorted(years) and len(years) >= 2
+
+
+# --- the tail: what a short-premium strategy loses when it is wrong ---
+
+def _result(returns):
+    from datetime import UTC, datetime
+
+    from bot.simulator import SimResult, SimTrade
+    t0 = datetime(2026, 1, 5, tzinfo=UTC)
+    return SimResult(trades=[SimTrade(t0, t0, "put", 1.0, 1.0, r, "x") for r in returns])
+
+
+def test_tail_check_fails_a_book_that_looks_fine_on_average():
+    """The whole reason this check exists. Selling premium wins small and often
+    and loses large and rarely, so a strategy about to destroy itself and a
+    sound one are indistinguishable on expectancy."""
+    # 200 wins at +5% outweigh one -900% loss, so the average is positive while
+    # the single worst trade is nine times the whole account's capital at risk.
+    ruinous = _result([0.05] * 200 + [-9.0])
+    assert ruinous.expectancy > 0                    # looks profitable
+    passed, row = robustness.check_tail(ruinous)
+    assert not passed
+    assert row.worst_trade == pytest.approx(-9.0)
+    assert row.loss_ratio == pytest.approx(180.0)    # 9.0 / 0.05
+
+
+def test_tail_check_passes_a_defined_risk_book():
+    """A spread cannot lose more than its capital at risk, so a worst trade at
+    the -100% floor is not by itself a failure — the drawdown decides."""
+    passed, row = robustness.check_tail(_result([0.10] * 30 + [-1.0] * 2))
+    assert passed
+    assert row.worst_trade == pytest.approx(-1.0)
+
+
+def test_tail_check_fails_when_losses_arrive_together():
+    """One bounded loss is survivable; six in a row is the thing that ends a
+    short-volatility book, and expectancy alone cannot distinguish them."""
+    clustered = _result([-1.0] * 9 + [0.10] * 60)
+    passed, row = robustness.check_tail(clustered)
+    assert not passed
+    assert row.max_drawdown > robustness.MAX_DRAWDOWN
+
+
+def test_tail_check_on_no_trades_does_not_pass():
+    passed, row = robustness.check_tail(_result([]))
+    assert not passed and row.trades == 0

@@ -18,22 +18,39 @@ existed keep their keys and stay countable in N.
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 DEFAULT_PATH = Path(__file__).resolve().parent / "trials.jsonl"
 
-Windows = dict[str, tuple[list[float], list]]
+# Either shape the searcher may hold: a (closes, times) pair or full bars.
+Windows = Mapping[str, Any]
+
+
+def _times_of(window: object) -> list:
+    """Timestamps from either a (closes, times) pair or full OhlcBars.
+
+    Both shapes reach here now that the searcher passes full bars, and the
+    dataset identity must not depend on which one a caller happens to hold —
+    the same bars under two shapes have to hash to the same window.
+    """
+    stamps = getattr(window, "times", None)
+    if stamps is not None:
+        return list(stamps)
+    return list(window[1])          # type: ignore[index]
 
 
 def window_id(windows: Windows) -> str:
     """Calendar identity of a dataset: earliest..latest bar date across all
     symbols. Two windows with the same name but different dates are different
     datasets, and a score from one says nothing about the other."""
-    starts = [times[0] for _, times in windows.values() if times]
-    ends = [times[-1] for _, times in windows.values() if times]
-    if not starts:
+    all_times = [t for w in windows.values() if (t := _times_of(w))]
+    if not all_times:
         return "empty"
+    starts = [t[0] for t in all_times]
+    ends = [t[-1] for t in all_times]
     return f"{min(starts).date().isoformat()}..{max(ends).date().isoformat()}"
 
 
