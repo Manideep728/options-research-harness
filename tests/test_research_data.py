@@ -314,6 +314,36 @@ def test_split_indices_agrees_with_split_at():
     assert [closes[i] for i in after] == h_closes
 
 
+def test_daily_quarantine_cuts_on_the_day_not_the_timestamp():
+    """The bug: a daily bar is stamped 00:00 ET of the session it summarizes,
+    and the holdout opens partway through a trading day. Comparing timestamps
+    made the bar for the holdout's FIRST day compare as earlier than the
+    cutoff, so one whole session of holdout price action stayed in the daily
+    cache that robustness.daily_regime_check reads."""
+    days = [_at("2026-06-01T04:00:00+00:00"),   # 00:00 ET, session of Jun 1
+            _at("2026-06-02T04:00:00+00:00"),
+            _at("2026-06-03T04:00:00+00:00")]   # the holdout's own day
+    bars = data.OhlcBars(times=days, opens=[1.0, 2.0, 3.0], highs=[1.0, 2.0, 3.0],
+                         lows=[1.0, 2.0, 3.0], closes=[1.0, 2.0, 3.0],
+                         volumes=[0.0] * 3, has_intrabar=True)
+    holdout_opens = _at("2026-06-03T15:30:00+00:00")   # 11:30 ET on Jun 3
+
+    # The old timestamp comparison keeps Jun 3, because 04:00 < 15:30.
+    assert len(data.ohlc_before(bars, holdout_opens)) == 3
+    # Cutting on the day drops it.
+    kept = data.ohlc_before_date(bars, holdout_opens)
+    assert len(kept) == 2
+    assert kept.closes == [1.0, 2.0]
+
+
+def test_daily_quarantine_keeps_every_day_before_the_holdout():
+    days = [_at(f"2026-06-0{d}T04:00:00+00:00") for d in (1, 2)]
+    bars = data.OhlcBars(times=days, opens=[1.0, 2.0], highs=[1.0, 2.0],
+                         lows=[1.0, 2.0], closes=[1.0, 2.0], volumes=[0.0, 0.0],
+                         has_intrabar=True)
+    assert len(data.ohlc_before_date(bars, _at("2026-06-03T15:30:00+00:00"))) == 2
+
+
 def test_ohlc_before_cutoff_trims_every_column():
     bars = _ohlc(10)
     kept = data.ohlc_before(bars, cutoff=bars.times[6])

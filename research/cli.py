@@ -29,6 +29,7 @@ from pathlib import Path
 from bot.config import Settings
 from bot.simulator import SimParams, SimResult, simulate
 from research import (
+    blocks,
     data,
     failure_report,
     gate,
@@ -307,6 +308,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "null":
         if args.window == "daily":
             windows = {s: data.load_bars("daily", s, args.data_dir) for s in cfg.symbols}
+            # Same conversion robustness.daily_regime_check performs. Without
+            # it a per-bar threshold calibrated on 15-minute bars is measured
+            # against daily bars, where the same number means something ~5x
+            # larger, and the candidate silently matches nothing.
+            blocked = [p for p in blocks.INTRADAY_ONLY_PARAMS if p in sig]
+            if blocked:
+                print(f"NOT EVALUABLE on daily bars: {', '.join(blocked)} is defined "
+                      "in intraday terms and has no daily equivalent.")
+                return 1
+            rescaled = blocks.rescale_to_daily(sig, robustness.bars_per_day(cfg))
+            if rescaled != sig:
+                changed = ", ".join(
+                    f"{k} {sig[k]:g} -> {rescaled[k]:.4g}"
+                    for k in blocks.BAR_RELATIVE_PARAMS if k in sig)
+                print(f"rescaled per-bar params for daily bars: {changed}")
+            sig = rescaled
         else:
             bars = {s: data.load_bars("intraday", s, args.data_dir) for s in cfg.symbols}
             bars = {s: b for s, b in bars.items() if b[0]}

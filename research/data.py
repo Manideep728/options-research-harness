@@ -211,6 +211,20 @@ def ohlc_before(bars: OhlcBars, cutoff: datetime) -> OhlcBars:
     return bars.take([i for i, ts in enumerate(bars.times) if ts < cutoff])
 
 
+def ohlc_before_date(bars: OhlcBars, cutoff: datetime) -> OhlcBars:
+    """Keep bars from calendar days strictly before `cutoff`'s day.
+
+    Quarantining the dailies by TIMESTAMP let one holdout day through. Alpaca
+    stamps a daily bar at 00:00 ET of the session it summarizes, and the
+    holdout starts partway through a trading day, so the daily bar for that day
+    compared as earlier than the cutoff while containing the whole session's
+    price action — including the part inside the holdout.
+    """
+    day = cutoff.astimezone(MARKET_TZ).date()
+    return bars.take([i for i, ts in enumerate(bars.times)
+                      if ts.astimezone(MARKET_TZ).date() < day])
+
+
 def bars_before(closes: list[float], times: list[datetime],
                 cutoff: datetime) -> Bars:
     """Bars strictly before `cutoff` — used to quarantine the holdout
@@ -435,8 +449,11 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
         daily = daily_by_symbol[symbol]
         if holdout_start is not None:
             # Quarantine the same calendar window in the dailies, using the
-            # SHARED holdout start so no symbol's dailies reach past it.
-            daily = ohlc_before(daily, cutoff=holdout_start)
+            # SHARED holdout start so no symbol's dailies reach past it. Cut on
+            # the DAY, not the timestamp: a daily bar stamped 00:00 ET compares
+            # as earlier than a holdout that opens mid-session, while covering
+            # that whole session.
+            daily = ohlc_before_date(daily, cutoff=holdout_start)
         save_ohlc(Path(data_dir) / "daily" / f"{symbol}.csv", daily)
 
         log.info("%s: cached %d intraday research bars, %d holdout, %d daily",
