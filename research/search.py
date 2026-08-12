@@ -22,6 +22,7 @@ report / robustness / gate. Nothing here touches the live bot.
 import itertools
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,15 +54,49 @@ class SearchOutcome:
     val_null: null.NullSummary | None = None
 
 
-def run_family(windows: dict[str, Bars], cfg: Settings, sp: SimParams,
-               family: Family, signal_params: dict) -> SimResult:
-    """Combined SimResult for one candidate across all symbols' windows."""
+# A window is either the (closes, times) pair most callers still hold, or full
+# bars. Mapping rather than dict in the signatures below: dict is invariant, so
+# a dict[str, Bars] would not satisfy a dict of the union.
+Window = Bars | data.OhlcBars
+
+
+def as_ohlc(window: Window) -> data.OhlcBars:
+    """Accept either a (closes, times) pair or full bars.
+
+    Most callers still hold the pair, and a pair carries no intra-bar range —
+    so it is wrapped with has_intrabar False and the barrier test falls back to
+    the close. That degrades honestly; it does not pretend to a range it lacks.
+    """
+    if isinstance(window, data.OhlcBars):
+        return window
+    closes, times = window
+    return data.ohlc_from_closes(closes, times)
+
+
+def run_family(windows: Mapping[str, Window], cfg: Settings,
+               sp: SimParams, family: Family, signal_params: dict,
+               ivs: Mapping[str, list[float]] | None = None) -> SimResult:
+    """Combined SimResult for one candidate across all symbols' windows.
+
+    The high, low and open columns are passed through when the caller supplies
+    full bars, so a barrier touched inside a bar exits AT the barrier. Without
+    them every exit books the full close-to-close move, and because gains are
+    unbounded while losses floor at -100%, that asymmetry alone made a coin
+    flip earn +0.34% per trade on daily bars where the honest figure is -8.01%.
+
+    `ivs` prices each symbol at its own implied volatility. A single constant
+    across a universe underprices whatever realizes more than it, and a random
+    signal collects that pricing error as if it were skill.
+    """
     combined = SimResult()
-    for symbol, (closes, times) in windows.items():
+    for symbol, window in windows.items():
+        bars = as_ohlc(window)
         result = simulate(
-            closes, times, cfg, sp,
-            signal_fn=lambda c, t=times, p=signal_params: family.signal(c, t, p),
+            bars.closes, bars.times, cfg, sp,
+            signal_fn=lambda c, t=bars.times, p=signal_params: family.signal(c, t, p),
             symbol=symbol,
+            highs=bars.highs, lows=bars.lows, opens=bars.opens,
+            ivs=None if ivs is None else ivs.get(symbol),
         )
         combined.trades.extend(result.trades)
     combined.trades.sort(key=lambda t: t.entry_time)
