@@ -59,6 +59,23 @@ def test_deflated_sharpe_shrinks_as_trials_pile_up():
         metrics.deflated_sharpe(returns, few_trials)
 
 
+def test_deflated_sharpe_counts_n_apart_from_the_spread():
+    """N and the spread are separate inputs: holding the spread fixed, a larger
+    N must still raise the bar. Regression for the two being read off one list,
+    which forced discarded trials to be dropped from N to drop them from sd."""
+    returns = [0.05, -0.02, 0.08, 0.01, 0.04, -0.03, 0.06, 0.02] * 4
+    spread = [0.1, -0.1, 0.3, -0.2, 0.25, 0.05, -0.15, 0.2]
+    assert metrics.deflated_sharpe(returns, spread, n_trials=2000) < \
+        metrics.deflated_sharpe(returns, spread, n_trials=8)
+
+
+def test_deflated_sharpe_n_defaults_to_the_spread_length():
+    returns = [0.05, -0.02, 0.08, 0.01] * 8
+    spread = [0.1, -0.1, 0.3, -0.2]
+    assert metrics.deflated_sharpe(returns, spread) == \
+        metrics.deflated_sharpe(returns, spread, n_trials=len(spread))
+
+
 def test_summarize_is_registry_safe():
     out = metrics.summarize([0.1, -0.05])
     assert out["trades"] == 2

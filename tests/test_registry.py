@@ -131,3 +131,52 @@ def test_dataset_change_marker_is_recorded_without_touching_n(tmp_path: Path):
     assert registry.trial_count(path) == 1
     kinds = [e["kind"] for e in registry.entries(path)]
     assert kinds == ["trial", "dataset_change"]
+
+
+def test_sharpe_spread_can_exclude_trials_from_a_replaced_model(tmp_path: Path):
+    """The spread describes the measuring instrument, so scores from a P&L
+    model that has been replaced must not widen it — while N still counts
+    them."""
+    path = tmp_path / "trials.jsonl"
+    for i, sharpe in enumerate([5.0, -5.0, 4.0]):
+        registry.log_trial(path, "old", {"a": i}, "train", {"sharpe": sharpe})
+    registry.log_dataset_change(path, "corrected P&L model")
+    for i, sharpe in enumerate([0.1, -0.1, 0.2]):
+        registry.log_trial(path, "new", {"a": i}, "train", {"sharpe": sharpe})
+
+    assert sorted(registry.trial_sharpes(path, since_dataset_change=True)) == \
+        [-0.1, 0.1, 0.2]
+    assert len(registry.trial_sharpes(path)) == 6
+    assert registry.trial_count(path) == 6
+
+
+def test_sharpe_spread_uses_the_most_recent_marker(tmp_path: Path):
+    path = tmp_path / "trials.jsonl"
+    registry.log_trial(path, "f", {"a": 0}, "train", {"sharpe": 9.0})
+    registry.log_dataset_change(path, "first")
+    registry.log_trial(path, "f", {"a": 1}, "train", {"sharpe": 7.0})
+    registry.log_dataset_change(path, "second")
+    for i, sharpe in enumerate([0.3, -0.3]):
+        registry.log_trial(path, "f", {"a": 10 + i}, "train", {"sharpe": sharpe})
+    assert sorted(registry.trial_sharpes(path, since_dataset_change=True)) == \
+        [-0.3, 0.3]
+
+
+def test_sharpe_spread_falls_back_when_the_slice_is_too_small(tmp_path: Path):
+    """One trial after the marker gives a zero variance, which collapses the
+    expected-max benchmark to zero and makes the gate EASIER. Prefer the stale
+    but populated estimate over no estimate at all."""
+    path = tmp_path / "trials.jsonl"
+    for i, sharpe in enumerate([0.5, -0.2, 0.4]):
+        registry.log_trial(path, "old", {"a": i}, "train", {"sharpe": sharpe})
+    registry.log_dataset_change(path, "corrected P&L model")
+    registry.log_trial(path, "new", {"a": 0}, "train", {"sharpe": 0.1})
+    assert len(registry.trial_sharpes(path, since_dataset_change=True)) == 4
+
+
+def test_sharpe_spread_without_any_marker_is_the_whole_history(tmp_path: Path):
+    path = tmp_path / "trials.jsonl"
+    for i, sharpe in enumerate([0.5, -0.2, 0.4]):
+        registry.log_trial(path, "f", {"a": i}, "train", {"sharpe": sharpe})
+    assert sorted(registry.trial_sharpes(path, since_dataset_change=True)) == \
+        sorted(registry.trial_sharpes(path))
