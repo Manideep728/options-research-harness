@@ -463,6 +463,14 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
     """
     client = StockHistoricalDataClient(cfg.api_key, cfg.secret_key)
 
+    # IEX, stated rather than defaulted. Over the range both feeds cover they
+    # agree bar for bar; IEX history only starts in November 2018, which does
+    # not bind at the default daily_years=5 but would at a longer lookback.
+    # Moving the universe to SIP is a DATASET CHANGE: it needs a refetch and a
+    # registry.log_dataset_change row, because every cached score was measured
+    # on these bars. fetch_vrp_inputs uses SIP for exactly that reason.
+    feed = DataFeed.IEX
+
     # Pass 1: download. Session-filter before splitting so the fractions are
     # computed over tradeable bars only.
     intraday_by_symbol: dict[str, OhlcBars] = {}
@@ -471,14 +479,14 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
         intraday = filter_ohlc_to_session(_fetch_ohlc(
             client, symbol,
             TimeFrame(cfg.bar_timeframe_minutes, TimeFrameUnit.Minute),
-            days=intraday_days,
+            days=intraday_days, feed=feed,
         ))
         if not len(intraday):
             log.warning("%s: no intraday bars returned; skipping symbol", symbol)
             continue
         intraday_by_symbol[symbol] = intraday
         daily_by_symbol[symbol] = _fetch_ohlc(client, symbol, TimeFrame.Day,
-                                              days=daily_years * 365)
+                                              days=daily_years * 365, feed=feed)
 
     if not intraday_by_symbol:
         log.warning("no symbols returned intraday bars; nothing cached")
@@ -521,8 +529,10 @@ def fetch_all(cfg: Settings, intraday_days: int = 365, daily_years: int = 5,
 
 
 def _fetch_ohlc(client: StockHistoricalDataClient, symbol: str,
-                timeframe: TimeFrame, days: int,
-                feed: DataFeed = DataFeed.IEX) -> OhlcBars:
+                timeframe: TimeFrame, days: int, feed: DataFeed) -> OhlcBars:
+    """`feed` is required, not defaulted. Which venue the bars come from is part
+    of the dataset's identity, and a default silently applies that choice to
+    every caller that forgets to think about it."""
     start = datetime.now(UTC) - timedelta(days=days)
     bars = cast(BarSet, client.get_stock_bars(
         StockBarsRequest(
@@ -543,12 +553,6 @@ def _fetch_ohlc(client: StockHistoricalDataClient, symbol: str,
         volumes=[float(b.volume or 0.0) for b in bars],
         has_intrabar=True,
     )
-
-
-def _fetch(client: StockHistoricalDataClient, symbol: str,
-           timeframe: TimeFrame, days: int,
-           feed: DataFeed = DataFeed.IEX) -> Bars:
-    return _fetch_ohlc(client, symbol, timeframe, days, feed).bars
 
 
 # --- CBOE volatility indices: the implied-vol side of the VRP test ---
