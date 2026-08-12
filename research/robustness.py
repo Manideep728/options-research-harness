@@ -29,6 +29,7 @@
 """
 
 import itertools
+import statistics
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import datetime
@@ -48,6 +49,12 @@ MIN_FOLDS = 2          # and we need at least this many countable folds
 REGIME_NULL_SEEDS = 100
 # Regular US session length, for converting intraday bars/day.
 SESSION_MINUTES = 390  # 09:30-16:00 ET
+# Tail limits, as fractions of capital at risk. A single trade may not lose
+# more than the whole of the capital the structure puts at risk, and the
+# cumulative give-back may not exceed MAX_DRAWDOWN of one position's risk.
+# These judge the LOSS side, which expectancy cannot see.
+MAX_WORST_TRADE = 1.0
+MAX_DRAWDOWN = 8.0
 
 
 def bars_per_day(cfg: Settings) -> float:
@@ -83,6 +90,50 @@ def perturbation_grid(base: SimParams) -> list[tuple[str, SimParams]]:
             roundtrip_cost=base.roundtrip_cost * f_cost,
         )))
     return out
+
+
+@dataclass
+class TailRow:
+    """What a strategy loses when it is wrong, not what it makes on average."""
+
+    trades: int
+    expectancy: float
+    worst_trade: float
+    max_drawdown: float
+    loss_ratio: float          # worst single loss / mean gain
+
+
+def check_tail(result, max_worst: float = MAX_WORST_TRADE,
+               max_dd: float = MAX_DRAWDOWN) -> tuple[bool, TailRow]:
+    """A separate pass/fail on the LOSS side.
+
+    Expectancy cannot judge a short-premium strategy. Selling options wins
+    small and often and loses large and rarely, so a book that is about to
+    destroy itself and one that is sound look identical on the average — right
+    up until the day they do not. Session 1 measured the shape on real data:
+    the mean variance risk premium is about +3.8 volatility points and the
+    worst single cycle is -63, a ratio near 17 to 1.
+
+    The two limits are on capital at risk, which is what the structure bounds.
+    A defined-risk spread cannot lose more than -1 on one trade, so a worst
+    trade at the floor is not automatically a failure — the drawdown is what
+    says whether those losses arrive together.
+    """
+    returns = [t.pnl_pct for t in result.trades]
+    if not returns:
+        return False, TailRow(0, 0.0, 0.0, 0.0, 0.0)
+    worst = min(returns)
+    gains = [r for r in returns if r > 0]
+    mean_gain = statistics.fmean(gains) if gains else 0.0
+    row = TailRow(
+        trades=len(returns),
+        expectancy=statistics.fmean(returns),
+        worst_trade=worst,
+        max_drawdown=result.max_drawdown,
+        loss_ratio=abs(worst) / mean_gain if mean_gain > 0 else float("inf"),
+    )
+    passed = worst >= -abs(max_worst) and row.max_drawdown <= max_dd
+    return passed, row
 
 
 def check_perturbations(windows: dict, cfg: Settings, family: Family,

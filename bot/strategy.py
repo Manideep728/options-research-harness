@@ -8,9 +8,36 @@ from bot.indicators import ema, rsi
 
 
 class Action(Enum):
+    """What a signal asks the engine to open.
+
+    The two SELL actions are defined-risk vertical CREDIT SPREADS, never naked
+    shorts: short one strike, long a further-OTM one. A naked short call has no
+    bounded loss, and a model that can express a position the risk rules forbid
+    will eventually report a result that depends on taking it.
+
+    Direction is about the underlying, not about the option type. A short put
+    spread is bullish and a short call spread is bearish, the same way a long
+    call is bullish and a long put is bearish.
+    """
+
     BUY_CALL = "BUY_CALL"
     BUY_PUT = "BUY_PUT"
+    SELL_PUT_SPREAD = "SELL_PUT_SPREAD"      # bullish, collects premium
+    SELL_CALL_SPREAD = "SELL_CALL_SPREAD"    # bearish, collects premium
     NONE = "NONE"
+
+    @property
+    def is_credit(self) -> bool:
+        return self in (Action.SELL_PUT_SPREAD, Action.SELL_CALL_SPREAD)
+
+    @property
+    def call_put(self) -> str:
+        return "call" if self in (Action.BUY_CALL, Action.SELL_CALL_SPREAD) else "put"
+
+    @property
+    def is_bullish(self) -> bool:
+        """True when the position gains as the underlying rises."""
+        return self in (Action.BUY_CALL, Action.SELL_PUT_SPREAD)
 
 
 @dataclass(frozen=True)

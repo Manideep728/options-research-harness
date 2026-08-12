@@ -151,7 +151,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"winner: signal={outcome.signal_params} exits={outcome.exit_params}")
             _print_result("train", outcome.train)
             _print_result("validation", outcome.val)
-            _print_result("baseline (live strategy) on validation", outcome.baseline_val)
+            incumbent = FAMILIES[outcome.family].baseline_family if (
+                outcome.family in FAMILIES) else None
+            _print_result(
+                f"baseline ({incumbent or 'live strategy'}) on validation",
+                outcome.baseline_val)
         if outcome.val_null is not None and outcome.val_null.seeds and outcome.val is not None:
             n = outcome.val_null
             print(f"coin-flip null on validation: {n.seeds} seeds, mean={n.mean:+.2%}, "
@@ -378,9 +382,20 @@ def main(argv: list[str] | None = None) -> int:
                    else f"null p95={row.null_threshold:+.2%} (null n={row.null_trades:.0f})")
             print(f"  {row.label:<8} n={row.trades:<4} expectancy={row.expectancy:+.2%}"
                   f"   {bar}")
+        t_ok, tail = robustness.check_tail(
+            search.run_family(val_w, run_cfg, SimParams(), family, sig))
+        print("tail (validation) — expectancy cannot see the loss side:")
+        print(f"  trades {tail.trades}   expectancy {tail.expectancy:+.2%}")
+        print(f"  worst single trade {tail.worst_trade:+.2%}   "
+              f"(limit {-robustness.MAX_WORST_TRADE:+.0%})")
+        print(f"  max drawdown       {tail.max_drawdown:.2f}x risk   "
+              f"(limit {robustness.MAX_DRAWDOWN:.1f}x)")
+        print(f"  worst loss is {tail.loss_ratio:.1f}x the mean gain")
+
         print(f"\nperturbation: {'PASS' if p_ok else 'FAIL'}   "
-              f"regime: {'PASS' if r_ok else 'FAIL'}")
-        return 0 if (p_ok and r_ok) else 1
+              f"regime: {'PASS' if r_ok else 'FAIL'}   "
+              f"tail: {'PASS' if t_ok else 'FAIL'}")
+        return 0 if (p_ok and r_ok and t_ok) else 1
 
     if args.command == "gate":
         gate_outcome = gate.run_gate(candidate, cfg, data_dir=args.data_dir,

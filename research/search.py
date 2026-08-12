@@ -31,7 +31,13 @@ from bot.config import Settings, clamp_tunables
 from bot.simulator import SimParams, SimResult, simulate
 from bot.tuner import IMPROVE_ABS_MARGIN, IMPROVE_FACTOR, MIN_TRADES
 from research import data, metrics, null, registry
-from research.families import EXIT_GRID, FAMILIES, Family, signal_candidates
+from research.families import (
+    EXIT_GRID,
+    FAMILIES,
+    Family,
+    clamp_params,
+    signal_candidates,
+)
 
 log = logging.getLogger("research.search")
 
@@ -91,12 +97,19 @@ def run_family(windows: Mapping[str, Window], cfg: Settings,
     combined = SimResult()
     for symbol, window in windows.items():
         bars = as_ohlc(window)
+        series = None if ivs is None else ivs.get(symbol)
+
+        def signal_fn(c, t=bars.times, p=signal_params, s=series):
+            # A family that declares needs_iv gets the volatility series too.
+            # It must handle s being None — a symbol with no volatility index
+            # has no rank, and inventing one would report a different strategy
+            # under this family's name.
+            return (family.signal(c, t, p, ivs=s) if family.needs_iv
+                    else family.signal(c, t, p))
+
         result = simulate(
-            bars.closes, bars.times, cfg, sp,
-            signal_fn=lambda c, t=bars.times, p=signal_params: family.signal(c, t, p),
-            symbol=symbol,
-            highs=bars.highs, lows=bars.lows, opens=bars.opens,
-            ivs=None if ivs is None else ivs.get(symbol),
+            bars.closes, bars.times, cfg, sp, signal_fn=signal_fn, symbol=symbol,
+            highs=bars.highs, lows=bars.lows, opens=bars.opens, ivs=series,
         )
         combined.trades.extend(result.trades)
     combined.trades.sort(key=lambda t: t.entry_time)
@@ -123,6 +136,49 @@ def split_all(bars_by_symbol: dict[str, Bars]) -> tuple[dict[str, Bars], dict[st
     return data.split_all(bars_by_symbol, data.TRAIN_FRACTION)
 
 
+WindowSet = tuple[dict[str, Window], dict[str, Window],
+                  dict[str, list[float]], dict[str, list[float]]]
+
+
+def load_windows(family: Family, cfg: Settings,
+                 data_dir: Path = data.DATA_DIR) -> WindowSet | None:
+    """(train, validation, train IVs, validation IVs) for this family.
+
+    A short-premium family runs on SPY/QQQ/IWM daily, because those are the
+    only symbols with a real implied volatility history. Pricing a sold option
+    at a volatility the market never quoted is the error that made a coin flip
+    look profitable, so the family declares the dataset it can be measured on
+    rather than inheriting whichever one the searcher happened to load.
+
+    The implied volatility series is rebuilt from each split window's own
+    timestamps, so it cannot slip out of step with the bars it prices.
+    """
+    if family.dataset == "vrp":
+        symbols = list(data.VOL_INDEX_UNDERLYING.values())
+        bars: dict[str, data.OhlcBars] = {
+            s: data.load_vrp_ohlc(s, data_dir) for s in symbols}
+        bars = {s: b for s, b in bars.items() if len(b)}
+        if not bars:
+            return None
+        train, val = data.split_all_ohlc(bars, data.TRAIN_FRACTION)
+    else:
+        loaded = {s: data.load_ohlc("intraday", s, data_dir) for s in cfg.symbols}
+        loaded = {s: b for s, b in loaded.items() if len(b)}
+        if not loaded:
+            return None
+        train, val = data.split_all_ohlc(loaded, data.TRAIN_FRACTION)
+
+    def ivs_for(w: dict[str, data.OhlcBars]) -> dict[str, list[float]]:
+        out = {}
+        for symbol, window in w.items():
+            series = data.implied_vol_series(symbol, window.times, data_dir)
+            if series is not None:
+                out[symbol] = series
+        return out
+
+    return (dict(train), dict(val), ivs_for(train), ivs_for(val))
+
+
 def resolve_family(candidate: dict) -> Family:
     """A candidate.json either names a built-in family or embeds a spec."""
     if candidate.get("spec"):
@@ -131,12 +187,25 @@ def resolve_family(candidate: dict) -> Family:
     return FAMILIES[candidate["family"]]
 
 
-def _with_exits(signal_candidates_list: list[dict]) -> list[tuple[dict, dict]]:
-    return [
-        (sig, clamp_tunables(dict(zip(EXIT_GRID.keys(), exits, strict=True))))
-        for sig in signal_candidates_list
-        for exits in itertools.product(*EXIT_GRID.values())
-    ]
+def _with_exits(signal_candidates_list: list[dict],
+                family: Family | None = None) -> list[tuple[dict, dict]]:
+    """Pair every signal candidate with every exit candidate.
+
+    A family may bring its own exit grid, in which case it is clamped against
+    its own bounds. clamp_tunables exists to keep exits on the LIVE bot's
+    rails, and a credit spread never runs on those rails — its best possible
+    outcome is below the live take-profit floor, so clamping it there would
+    replace every target with one that can never trigger.
+    """
+    grid = (family.exit_grid if family and family.exit_grid else EXIT_GRID)
+    bounds = family.exit_bounds if family else None
+    out = []
+    for sig in signal_candidates_list:
+        for exits in itertools.product(*grid.values()):
+            raw = dict(zip(grid.keys(), exits, strict=True))
+            clamped = (clamp_params(raw, bounds) if bounds else clamp_tunables(raw))
+            out.append((sig, clamped))
+    return out
 
 
 def search_family(family_name: str, cfg: Settings, sp: SimParams = SimParams(),
@@ -144,7 +213,7 @@ def search_family(family_name: str, cfg: Settings, sp: SimParams = SimParams(),
                   registry_path: Path = registry.DEFAULT_PATH,
                   candidate_path: Path = CANDIDATE_PATH) -> SearchOutcome:
     family = FAMILIES[family_name]
-    return _search(family, _with_exits(signal_candidates(family)), cfg, sp,
+    return _search(family, _with_exits(signal_candidates(family), family), cfg, sp,
                    data_dir, registry_path, candidate_path)
 
 
@@ -167,12 +236,11 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
             sp: SimParams, data_dir: Path, registry_path: Path,
             candidate_path: Path, spec: dict | None = None) -> SearchOutcome:
     family_name = family.name
-    bars = {s: data.load_bars("intraday", s, data_dir) for s in cfg.symbols}
-    bars = {s: b for s, b in bars.items() if b[0]}
-    if not bars:
+    windows = load_windows(family, cfg, data_dir)
+    if windows is None:
         return SearchOutcome(False, "no cached bars — run `python -m research fetch`",
                              family_name, {}, {}, None, None, None)
-    train_w, val_w = split_all(bars)
+    train_w, val_w, train_iv, val_iv = windows
     # Identity of the exact bars being scored. Without this in the key, a score
     # survives `fetch` moving the split boundaries and gets reused on different
     # data — see research/registry.py.
@@ -200,7 +268,7 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
             expectancy = float(cached.get("expectancy", 0.0))
         else:
             train_res = run_family(train_w, replace(cfg, **exit_params), sp,
-                                   family, sig_params)
+                                   family, sig_params, ivs=train_iv)
             registry.log_trial(
                 registry_path, family_name, params,
                 "train", _score(train_res),
@@ -224,21 +292,26 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
     # The evidence write needs the winner's full SimResult, and the registry
     # only stores summary scores (no trades). Re-simulate the single winner
     # once — one run, not the whole grid — whether or not it was reused above.
-    best_train = run_family(train_w, replace(cfg, **best_exit), sp, family, best_sig)
+    best_train = run_family(train_w, replace(cfg, **best_exit), sp, family, best_sig,
+                            ivs=train_iv)
 
-    # One validation run for the single winner; baseline = the live strategy
-    # (current cfg, default signal) on the same validation bars.
-    val_res = run_family(val_w, replace(cfg, **best_exit), sp, family, best_sig)
-    baseline_val = SimResult()
-    for symbol, (closes, times) in val_w.items():
-        baseline_val.trades.extend(simulate(closes, times, cfg, sp, symbol=symbol).trades)
+    # One validation run for the single winner, then the incumbent it has to
+    # beat on the same bars.
+    val_res = run_family(val_w, replace(cfg, **best_exit), sp, family, best_sig,
+                         ivs=val_iv)
+    baseline_val = _baseline_on(family, val_w, val_iv, cfg, sp)
     registry.log_trial(registry_path, family_name, {**best_sig, **best_exit},
                        "val", _score(val_res),
                        dataset=val_id)
 
     # The coin-flip control on the same validation bars, sized to the winner's
     # own trade count so the comparison is like-for-like.
-    val_null = null.null_distribution(val_w, replace(cfg, **best_exit), sp, val_res.n)
+    # The control trades the SAME structure as the candidate. A coin flip
+    # buying options loses about 10% per trade, so benchmarking a premium
+    # seller against it would pass anything that sells.
+    val_null = null.null_distribution(
+        val_w, replace(cfg, **best_exit), sp, val_res.n, ivs=val_iv,
+        actions=null.CREDIT_ACTIONS if family.credit else null.LONG_ACTIONS)
 
     outcome = _judge(family_name, best_sig, best_exit, best_train, val_res,
                      baseline_val, val_null)
@@ -246,6 +319,29 @@ def _search(family: Family, candidates: list[tuple[dict, dict]], cfg: Settings,
     if outcome.accepted:
         _write_candidate(candidate_path, outcome)
     return outcome
+
+
+def _baseline_on(family: Family, windows: Mapping[str, Window],
+                 ivs: Mapping[str, list[float]], cfg: Settings,
+                 sp: SimParams) -> SimResult:
+    """The incumbent this family must beat on these bars.
+
+    By default that is the live EMA and RSI strategy. A short-premium family
+    names another family instead, because comparing a sold spread against a
+    bought call answers no useful question — the honest incumbent is the same
+    trade with the timing rule removed, i.e. collecting the premium blindly.
+    """
+    if family.baseline_family:
+        incumbent = FAMILIES[family.baseline_family]
+        params = signal_candidates(incumbent)[0]
+        return run_family(windows, cfg, sp, incumbent, params, ivs=ivs)
+    combined = SimResult()
+    for symbol, window in windows.items():
+        bars = as_ohlc(window)
+        combined.trades.extend(
+            simulate(bars.closes, bars.times, cfg, sp, symbol=symbol,
+                     highs=bars.highs, lows=bars.lows, opens=bars.opens).trades)
+    return combined
 
 
 def _judge(family_name: str, sig: dict, exits: dict, train: SimResult,

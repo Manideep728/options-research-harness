@@ -98,16 +98,27 @@ def percentile(values: list[float], q: float) -> float:
     return ordered[min(len(ordered) - 1, max(0, idx))]
 
 
-def null_family(seed: int, fire_rate: float) -> Family:
+LONG_ACTIONS = (Action.BUY_CALL, Action.BUY_PUT)
+CREDIT_ACTIONS = (Action.SELL_PUT_SPREAD, Action.SELL_CALL_SPREAD)
+
+
+def null_family(seed: int, fire_rate: float,
+                actions: tuple[Action, Action] = LONG_ACTIONS) -> Family:
     """A Family whose signal is a coin flip: `fire_rate` chance of entering on
-    any bar, then call or put with equal probability.
+    any bar, then one of `actions` with equal probability.
+
+    `actions` has to match the STRUCTURE the candidate trades. A control that
+    buys options while the candidate sells them measures the cost of buying,
+    not the skill of the candidate: the buyer pays the premium and loses about
+    10% per trade, so any seller clears that bar without needing an edge. The
+    honest control for a premium seller is a premium seller with random timing.
 
     Causal by construction — it never reads `closes` at all, so it cannot peek
     at the future, which is the one property the P&L engine requires.
     """
 
     def signal(closes: list[float], times: "list[datetime] | None",
-               params: dict) -> list[Action]:
+               params: dict, ivs: "list[float] | None" = None) -> list[Action]:
         # Seed off the series identity, not just `seed`, so the 30 symbols get
         # independent draws. Sharing one draw across a correlated universe
         # would pile every null trade onto the same bars and inflate the
@@ -119,7 +130,7 @@ def null_family(seed: int, fire_rate: float) -> Family:
             if rng.random() >= fire_rate:
                 out.append(Action.NONE)
             else:
-                out.append(Action.BUY_CALL if rng.random() < 0.5 else Action.BUY_PUT)
+                out.append(actions[0] if rng.random() < 0.5 else actions[1])
         return out
 
     return Family(
@@ -149,7 +160,8 @@ def fire_rate_for(windows: dict[str, Bars], target_trades: int) -> float:
 def null_distribution(windows: Mapping[str, "Bars | OhlcBars"], cfg: Settings,
                       sp: SimParams, target_trades: int,
                       seeds: int = DEFAULT_SEEDS,
-                      ivs: Mapping[str, list[float]] | None = None) -> NullSummary:
+                      ivs: Mapping[str, list[float]] | None = None,
+                      actions: tuple[Action, Action] = LONG_ACTIONS) -> NullSummary:
     """Run `seeds` independent coin flips over `windows` and collect one
     expectancy each. Seeds that produce no trades are dropped rather than
     scored as 0.0, which would drag the threshold toward zero.
@@ -173,7 +185,8 @@ def null_distribution(windows: Mapping[str, "Bars | OhlcBars"], cfg: Settings,
     expectancies: list[float] = []
     trades: list[int] = []
     for seed in range(seeds):
-        result = run_family(windows, cfg, sp, null_family(seed, fire_rate), {},
+        result = run_family(windows, cfg, sp,
+                            null_family(seed, fire_rate, actions), {},
                             ivs=ivs)
         if result.n == 0:
             continue

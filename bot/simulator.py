@@ -88,9 +88,13 @@ class SimTrade:
     direction: str      # "call" | "put"
     entry_px: float
     exit_px: float
-    pnl_pct: float      # of premium, net of costs
+    pnl_pct: float      # of capital at risk, net of costs
     reason: str
     symbol: str = ""    # set when the caller simulates one known underlying
+    # True when the trade SOLD a defined-risk spread rather than buying an
+    # option. pnl_pct is a fraction of capital at risk either way, so the two
+    # remain comparable; this records which shape produced it.
+    is_credit: bool = False
 
 
 @dataclass
@@ -190,13 +194,16 @@ def simulate(
             i += 1
             continue
 
-        direction = 1.0 if signals[i] == Action.BUY_CALL else -1.0
+        action = signals[i]
         entry_px, entry_t = closes[i], times[i]
         iv = None if ivs is None else ivs[i]
+        structure = open_structure(entry_px, action.call_put, sp,
+                                   is_credit=action.is_credit, iv=iv)
         exit_reason = "end of data"
         exit_j = n - 1
-        pnl = option_return(closes[n - 1], entry_px, direction,
-                            (times[n - 1] - entry_t).total_seconds() / 86400, sp, iv)
+        pnl = structure.return_at(closes[n - 1],
+                                  (times[n - 1] - entry_t).total_seconds() / 86400,
+                                  sp, iv)
 
         for j in range(i + 1, n):
             days = (times[j] - entry_t).total_seconds() / 86400
@@ -207,7 +214,7 @@ def simulate(
             # booked there — not at the close, which would credit the rest of
             # the day's move to a position the engine would already have shut.
             if times[j].date() != times[j - 1].date():
-                open_ret = option_return(opens[j], entry_px, direction, days, sp, iv)
+                open_ret = structure.return_at(opens[j], days, sp, iv)
                 if open_ret >= cfg.take_profit_pct:
                     exit_reason, exit_j, pnl = "take profit", j, open_ret
                     break
@@ -219,31 +226,33 @@ def simulate(
             # exits AT the barrier. Test the adverse extreme first: when one bar
             # touches both barriers, OHLC cannot say which came first, and
             # assuming the loss is the only choice that cannot flatter.
-            adverse = lows[j] if direction > 0 else highs[j]
-            favourable = highs[j] if direction > 0 else lows[j]
-            if option_return(adverse, entry_px, direction, days, sp,
-                             iv) <= -cfg.stop_loss_pct:
+            # Which extreme is adverse follows the position's DIRECTION, not
+            # the option type: a short put spread is bullish, so its bad news
+            # is the low, exactly like a long call.
+            adverse = lows[j] if structure.is_bullish else highs[j]
+            favourable = highs[j] if structure.is_bullish else lows[j]
+            if structure.return_at(adverse, days, sp, iv) <= -cfg.stop_loss_pct:
                 exit_reason, exit_j, pnl = "stop loss", j, -cfg.stop_loss_pct
                 break
-            if option_return(favourable, entry_px, direction, days, sp,
-                             iv) >= cfg.take_profit_pct:
+            if structure.return_at(favourable, days, sp, iv) >= cfg.take_profit_pct:
                 exit_reason, exit_j, pnl = "take profit", j, cfg.take_profit_pct
                 break
             if days >= cfg.max_hold_days:
-                exit_reason, exit_j, pnl = "max hold", j, option_return(
-                    closes[j], entry_px, direction, days, sp, iv)
+                exit_reason, exit_j = "max hold", j
+                pnl = structure.return_at(closes[j], days, sp, iv)
                 break
 
         result.trades.append(
             SimTrade(
                 entry_time=entry_t,
                 exit_time=times[exit_j],
-                direction="call" if direction > 0 else "put",
+                direction=action.call_put,
                 entry_px=entry_px,
                 exit_px=closes[exit_j],
                 pnl_pct=pnl,
                 reason=exit_reason,
                 symbol=symbol,
+                is_credit=action.is_credit,
             )
         )
         i = exit_j + 1  # flat again; scan for the next signal
@@ -274,6 +283,13 @@ class OpenStructure:
     is_credit: bool
     entry_value: float            # cash actually paid, or actually received
     max_loss: float               # per share; > 0
+
+    @property
+    def is_bullish(self) -> bool:
+        """True when the position gains as the underlying rises. A long call
+        and a SHORT PUT spread are both bullish, so the barrier test cannot
+        read direction off call_put alone."""
+        return (self.call_put == "call") is not self.is_credit
 
     @property
     def max_gain(self) -> float:
@@ -368,18 +384,12 @@ def premium_of(spot: float, entry_px: float, direction: float, days: float,
 
 def option_return(px: float, entry_px: float, direction: float, days: float,
                   sp: SimParams, iv: float | None = None) -> float:
-    """Return on premium after `days`, from Black-Scholes at entry and exit.
+    """Return on premium after `days` for a LONG option.
 
-    The spread is charged on both legs rather than subtracted at the end: you
-    buy above mid and sell below it. That also makes -100% the natural floor —
-    when the contract expires worthless the exit leg is zero, so the return is
-    exactly -1 with no clamp. Subtracting a flat cost from a return already at
-    -1 would report a loss larger than the premium, which cannot happen.
+    Kept as the name research/replay.py reprices positions with. It delegates
+    to OpenStructure so there is one implementation of the arithmetic and not
+    two that can drift.
     """
-    entry_premium = premium_of(entry_px, entry_px, direction, 0.0, sp, iv)
-    if entry_premium <= 0.0:
-        return -1.0
-    half_spread = sp.roundtrip_cost / 2.0
-    paid = entry_premium * (1.0 + half_spread)
-    received = premium_of(px, entry_px, direction, days, sp, iv) * (1.0 - half_spread)
-    return received / paid - 1.0
+    call_put = "call" if direction > 0 else "put"
+    return open_structure(entry_px, call_put, sp, is_credit=False,
+                          iv=iv).return_at(px, days, sp, iv)
