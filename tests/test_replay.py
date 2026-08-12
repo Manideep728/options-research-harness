@@ -163,16 +163,20 @@ def test_synthesized_chain_passes_the_live_liquidity_filter(tmp_path):
     assert (chain[0].ask - chain[0].bid) / chain[0].mid < cfg.max_spread_pct_of_mid
 
 
-def test_worthless_position_reports_zero_and_the_engine_will_not_exit_it(tmp_path):
-    """FINDING, not a replay bug: option_return floors at -100%, so a total
-    loss prices the premium at exactly 0.0 — and bot/engine.py's manage_exits
-    skips any position with current_price <= 0 ("no price; skipping exit
-    check"). Live, a dying option really can quote a zero bid, so a worthless
-    position is never closed and permanently occupies a max_positions slot.
+def test_a_total_loss_reports_a_price_of_exactly_zero(tmp_path):
+    """The state that surfaced a live-engine bug, pinned here so it stays
+    reachable. option_return floors at -100%, so a total loss prices the
+    premium at exactly 0.0 rather than at some small residual.
 
-    This test documents the behaviour so the finding is reproducible; fixing it
-    means changing when the live bot closes positions, which is a trading
-    decision, not a refactor."""
+    That is what a dying option really quotes, and bot/engine.py's manage_exits
+    used to skip any position with current_price <= 0 — so exit_reason never
+    ran and the dead contract held one of three max_positions slots until
+    expiry. The engine now falls through instead; the fix is covered by
+    test_worthless_position_is_closed_not_stranded in tests/test_engine.py.
+
+    This test guards the other half: if ReplayBroker ever priced a total loss
+    at 0.01 instead of 0.0, replay would stop being able to produce the case
+    at all, and the next bug of this shape would go unfound."""
     closes, times = wave_bars(6)
     cfg = cfg_for(tmp_path, ("SPY",))
     broker = replay.ReplayBroker({"SPY": (closes, times)}, cfg)

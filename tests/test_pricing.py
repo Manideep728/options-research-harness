@@ -64,10 +64,11 @@ def test_payoff_is_convex_not_linear():
 
 
 def test_real_premium_is_far_above_the_constant_simparams_assumed():
-    """SimParams.premium_pct_of_spot = 0.005 for a first-OTM 7-14 DTE contract.
-    Priced properly the same contract costs about 0.93% of spot, so the real
-    gearing is near 43x rather than the 80x the simulator assumed. Every return
-    the old model produced was scaled by roughly two."""
+    """The old SimParams carried a constant `premium_pct_of_spot = 0.005` for a
+    first-OTM 7-14 DTE contract; the field is gone and this test is why. Priced
+    properly the same contract costs about 0.93% of spot, so the real gearing is
+    near 43x rather than the 80x the simulator assumed. Every return the old
+    model produced was scaled by roughly two."""
     spot, vol, years = 100.0, 0.20, 10 / 365
     strike = pricing.strike_for(spot, 0.01, "call")
     premium = pricing.price(spot, strike, years, vol, "call")
