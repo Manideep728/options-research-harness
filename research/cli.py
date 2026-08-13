@@ -13,7 +13,7 @@ The intended cycle:
 Separate from that cycle:
     vrp    -> is there a variance risk premium to harvest at all? Asked from
               public data before any strategy exists, because the lesson of the
-              987 trials above is that searching inside an unvalidated
+              986 trials above is that searching inside an unvalidated
               measurement layer finds the layer, not the market.
 """
 
