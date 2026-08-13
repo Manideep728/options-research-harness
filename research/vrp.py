@@ -4,7 +4,7 @@ The thesis under test: implied volatility systematically exceeds the volatility
 that subsequently shows up, so option SELLERS collect the difference. The bot is
 currently a structural option buyer, i.e. on the other side of it.
 
-Why this module runs before any strategy code exists. The repo already spent 987
+Why this module runs before any strategy code exists. The repo already spent 986
 trials searching for edge inside a measurement layer nobody had validated, and
 the whole finding was that the edge belonged to the simulator rather than the
 market. The correction is not to search more carefully — it is to ask whether
