@@ -135,13 +135,13 @@ flowchart LR
         nullmod --> search
         vrpmod -. "licenses the attempt" .-> search
     end
-    replaymod -. "same 11-method interface as broker.py" .-> engine
+    replaymod -. "same 12-method interface as broker.py" .-> engine
     gate -. "evidence for manual review" .-> tuned
 ```
 
 The decision worth pointing at: `bot/engine.py` depends only on a duck-typed
-broker interface, 11 methods wide. So `research/replay.py` implements those same
-11 methods against the CSV bar cache and drives **the real** `Engine.run_cycle()`
+broker interface, 12 methods wide. So `research/replay.py` implements those same
+12 methods against the CSV bar cache and drives **the real** `Engine.run_cycle()`
 — with the real risk gates, scanner, and contract selection running inside it —
 with zero edits to the engine.
 

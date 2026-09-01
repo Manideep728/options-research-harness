@@ -106,7 +106,7 @@ class ReplayStats:
 
 
 class ReplayBroker:
-    """The 11-method broker interface, backed by cached bars.
+    """The 12-method broker interface, backed by cached bars.
 
     `timeline` is the union of every symbol's bar timestamps, so one step of
     the replay is one moment in time for the whole universe — the engine polls
