@@ -1,6 +1,6 @@
 # Tests and quality gates
 
-> Part of [trading_bot_new](../README.md).
+> Part of [options-research-harness](../README.md).
 
 ```powershell
 .venv\Scripts\python -m pytest tests -q   # 380 tests
