@@ -1,51 +1,66 @@
-# The Backtester Was Lying, and I Built the Test That Caught It
+# Options Research Harness
 
-[![CI](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml)
+[![CI](https://github.com/Manideep728/options-research-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/options-research-harness/actions/workflows/ci.yml)
 
-An options trading bot on an **Alpaca paper account**, plus the research harness
-that evaluates it. The interesting part is not the bot. It is that the harness
-searched 986 strategy configurations, reported a plausible number for every one
-of them, and every one of those numbers was wrong — because of four lines in the
-simulator's exit loop.
+An options trading bot on an Alpaca paper account, and the offline harness that
+checks whether its own backtest is lying to it.
+
+I found a bug in the harness after it had already searched 986 strategy
+configurations. It had reported a plausible result for every one of them, and
+all of them were wrong. The cause was four lines in the simulator's exit loop.
 
 ## The two findings
 
-**1. The backtest manufactured its own edge.** `bot/simulator.py` detected a
-barrier crossing and then booked the full return of the bar rather than the
-barrier. Losses were floored at −100%; gains were not. Symmetric price noise
-therefore produced expectancy with no forecast involved. The floor alone was
-worth **31 percentage points** of phantom edge. Nothing in the repo had ever
-checked whether a random signal earns zero, so `research/null.py` now does, and
-it is wired in as a threshold rather than a report.
+**1. The backtest manufactured its own edge.** When a simulated price crossed a
+stop or take-profit barrier, `bot/simulator.py` booked the bar's full return
+instead of the barrier level. Losses were floored at −100% and gains were not,
+so symmetric price noise came out as positive expectancy with no forecast
+involved. Isolating the floor put it at roughly 31 percentage points of the
+phantom edge. (That was a one-off ablation; the unfloored variant is no longer
+in the code, so the 31 figure is not something you can regenerate here.)
 
-→ [The full postmortem](docs/postmortem.md) — the bug, the test that catches it,
-four more defects the same audit turned up, and what it did to the headline
-result.
+Nothing in the repo had ever checked whether a random signal earns zero.
+`research/null.py` does that now, and it rejects rather than reports:
+`research/search.py` fails any winner that does not clear the coin flip's 95th
+percentile.
 
-**2. The premium is real; no timing rule beats collecting it.** With the ruler
-corrected, one pre-registered thesis was tested: sell the variance risk premium.
-`python -m research vrp` reports **+3.79 volatility points** on VIX/SPY against a
-0.56 cost hurdle, positive on 84.3% of days. Three entry rules were then measured
-against a structure-matched control, and all three were **REJECTED**. The control
-itself earns +0.70% to +0.82% per trade. That is the finding: the premium is
-payment for holding a risk, not a mispricing anyone times.
+→ [The full postmortem](docs/postmortem.md) covers the bug, the test that
+catches it, and four more defects the same audit turned up.
 
-→ [The variance risk premium arc](docs/variance-risk-premium.md) — the kill
-criterion, the three defects that made the ruler unusable for this, and the
-verdict.
+**2. The premium is real, but no timing rule beat just collecting it.** With the
+simulator fixed, I pre-registered one thesis and tested it: sell the variance
+risk premium. `python -m research vrp` measures +3.79 volatility points on
+VIX/SPY against a 0.56 cost hurdle, positive on 84.3% of days.
+
+I then measured three entry rules against a structure-matched control. All three
+were rejected. The control on its own earns +0.70% to +0.82% per trade and none
+of the rules beat it, which suggests the premium is payment for holding a risk
+rather than something a timing rule can capture.
+
+Those figures come from a recorded run, not from a fresh clone. `research/data/`
+is gitignored because the bar cache is large and re-fetchable, so reproducing
+them means running `python -m research vrp --fetch` with your own Alpaca keys
+first. The three-rule comparison is written up in the doc below, but its table
+is not backed by committed data either.
+
+→ [The variance risk premium arc](docs/variance-risk-premium.md) has the kill
+criterion, the three defects that made the simulator unusable for this question,
+and the verdict.
 
 **Paper trading only.** The broker client is hard-wired to Alpaca's paper
-endpoint. Nothing here is financial advice, and the live strategy has **no
-demonstrated edge** — four completed round trips on the paper account, all four
-losers, −$600 realized. The risk caps exist to contain the damage while evidence
-accumulates. The burn-once holdout gate has never been run.
+endpoint; `paper=True` is a literal in `bot/broker.py`, not a setting. Nothing
+here is financial advice, and the live strategy has no demonstrated edge. It has
+completed only a handful of round trips, all of them losers, and `trades.csv` is
+gitignored, so that is not something you can verify from the repo. The risk caps
+exist to limit the damage until I have more data. The burn-once holdout gate has
+never been run.
 
 ## The registry counts
 
-The repo's pitch is numerical rigor, so its own headline count is stated once,
-here, and every other page links to this section instead of restating it.
-`research/trials.jsonl` is append-only and committed, because the number of
-things you tried is the denominator of every honest claim.
+`research/trials.jsonl` is append-only and committed. Every configuration I have
+ever tested is logged there, because the deflated Sharpe ratio in
+`research/metrics.py` takes the total number of attempts as an input. The counts
+are stated here once and the other pages link back rather than restating them.
 
 | figure | value | what it means |
 |---|---:|---|
@@ -54,8 +69,9 @@ things you tried is the denominator of every honest claim.
 | Unique trials on the current model | **174** | Logged after the most recent marker. Only these estimate the deflated Sharpe's variance. |
 
 Nothing is ever deleted. Trials measured on a P&L model that was later replaced
-stay counted in `N`, because those attempts were real chances to get lucky; a
-`dataset_change` row marks them as non-comparable. Reproduce the table with:
+still count toward `N`, because they were real chances to get lucky. A
+`dataset_change` row marks them as non-comparable to what came after. You can
+reproduce the table with:
 
 ```powershell
 .venv\Scripts\python -c "from research import registry; print(registry.trial_count())"
@@ -77,12 +93,12 @@ cp .env.example .env
 .venv/bin/python main.py
 ```
 
-Get free **paper** keys at https://alpaca.markets → Paper Trading → generate an
-API key pair. `DRY_RUN=true` runs the full pipeline against real market data and
-logs orders without submitting them; start there.
+Free paper keys come from https://alpaca.markets, under Paper Trading, where you
+generate an API key pair. `DRY_RUN=true` runs the whole pipeline against real
+market data and logs orders without submitting them. Start there.
 
-→ [Operations](docs/operations.md) — setup detail, the dashboard, and the
-guarded self-tuner.
+→ [Operations](docs/operations.md) goes through setup in more detail, plus the
+dashboard and the guarded self-tuner.
 
 ## Architecture
 
@@ -135,18 +151,18 @@ flowchart LR
         nullmod --> search
         vrpmod -. "licenses the attempt" .-> search
     end
-    replaymod -. "same 11-method interface as broker.py" .-> engine
+    replaymod -. "same 12-method interface as broker.py" .-> engine
     gate -. "evidence for manual review" .-> tuned
 ```
 
-The decision worth pointing at: `bot/engine.py` depends only on a duck-typed
-broker interface, 11 methods wide. So `research/replay.py` implements those same
-11 methods against the CSV bar cache and drives **the real** `Engine.run_cycle()`
-— with the real risk gates, scanner, and contract selection running inside it —
-with zero edits to the engine.
+`bot/engine.py` never imports Alpaca. It depends only on a duck-typed broker
+object, 12 methods wide. `research/replay.py` implements those same 12 methods
+against the CSV bar cache, which lets the backtest drive the real
+`Engine.run_cycle()`, with the real risk gates, scanner and contract selection
+running inside it, and no changes to the engine at all.
 
-→ [Architecture](docs/architecture.md) — the broker interface, the strategy
-rules, and the file-by-file layout.
+→ [Architecture](docs/architecture.md) lists the broker interface, the strategy
+rules and the file-by-file layout.
 
 ## Tests
 
@@ -157,31 +173,28 @@ rules, and the file-by-file layout.
 cd web; npm run lint; npm run build       # frontend
 ```
 
-CI runs all five on every push and pull request. The suite is near 1:1 with
-modules, and the tests that pin the findings above are worth reading first —
-`test_regime_guard_rejects_a_coin_flip` is the regression test for the whole
-audit.
+CI runs all five of these on every push to `main` and on every pull request.
+There is roughly one test file per module. If you only read a few, read the ones
+listed below; `test_regime_guard_rejects_a_coin_flip` is the regression test for
+the whole audit.
 
-→ [Tests and quality gates](docs/tests.md) — the eleven tests that pin the
-findings, and what the rest cover.
+→ [Tests and quality gates](docs/tests.md) walks through the eleven tests that
+pin the findings, and summarizes what the rest cover.
 
 ## How this was built
 
-This repo was written with AI assistance. What is mine is the direction, the
-review, and the decision to distrust the output — which is the part the repo
-actually demonstrates.
+This repo was written with AI assistance. The direction, the review and the
+decision to distrust the output were mine.
 
-`research/proposer.py` is that posture in running code. An LLM may propose
-strategies only as **JSON specs drawn from a fixed block vocabulary with clamped
-parameters — never as code**. Every proposal is validated against
-`research/blocks.py`, logged to the committed registry, and counted in `N`, so a
-model that proposes a hundred ideas raises the statistical bar its own winner
-must clear. The guardrails exist because the generator is not trusted, including
-when the generator is writing this system.
+`research/proposer.py` is where that shows up in code. An LLM can propose
+strategies, but only as JSON specs drawn from the fixed block vocabulary in
+`research/blocks.py`, with every parameter clamped to a bounded range. It cannot
+emit code. Each proposal is validated, logged to the committed registry and
+counted in `N`, so a model that fires off a hundred ideas raises the statistical
+bar its own winner has to clear.
 
-The same discipline caught the failure this README leads with: the tooling
-produced 986 plausible results, and the control that was missing is what proved
-them wrong.
+That is also how the original bug surfaced. The tooling produced 986 plausible
+results, and the control it was missing is what showed they were wrong.
 
 ## Documentation
 
@@ -196,4 +209,4 @@ them wrong.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

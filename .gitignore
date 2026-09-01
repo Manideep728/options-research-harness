@@ -22,6 +22,7 @@ QUESTIONS.md
 INTERVIEW_PREP.md
 BUGS_AND_FINDINGS.md
 HIRING_REVIEW.md
+RESUME_ENTRY.md
 .claude/scheduled_tasks.lock
 # Research data cache: large, re-fetchable from Alpaca; never committed.
 research/data/

@@ -1,6 +1,6 @@
 # The second attempt: sell the variance risk premium
 
-> Part of [trading_bot_new](../README.md).
+> Part of [options-research-harness](../README.md).
 
 The audit in the [postmortem](postmortem.md) corrected the measurement. It did
 not supply a strategy. So the
