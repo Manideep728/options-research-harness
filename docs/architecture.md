@@ -22,8 +22,8 @@ The fix needed no rewrite, because `bot/engine.py` was already built for it:
 > so the whole cycle is testable with a fake broker.
 > — `bot/engine.py`, line 3
 
-`tests/test_engine.py` already proved that interface is **11 methods** wide.
-So `research/replay.py` implements the same 11 methods against the CSV bar cache,
+`tests/test_engine.py` already proved that interface is **12 methods** wide.
+So `research/replay.py` implements the same 12 methods against the CSV bar cache,
 and `Engine.run_cycle()` — the real one, with the real `bot/risk.py`,
 `bot/scanner.py` and `bot/options.py` running inside it — becomes the thing
 under test. A one-hour spike confirmed this before the class was written:
