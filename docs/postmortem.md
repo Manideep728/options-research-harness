@@ -1,6 +1,6 @@
 # Postmortem: the backtester was lying
 
-> Part of [trading_bot_new](../README.md).
+> Part of [options-research-harness](../README.md).
 
 ## The bug
 

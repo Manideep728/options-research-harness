@@ -1,6 +1,6 @@
 # Architecture
 
-> Part of [trading_bot_new](../README.md).
+> Part of [options-research-harness](../README.md).
 
 The diagram is in the [README](../README.md#architecture); this page is the prose behind it.
 

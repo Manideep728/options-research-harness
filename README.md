@@ -1,6 +1,6 @@
-# The Backtester Was Lying, and I Built the Test That Caught It
+# Options Research Harness
 
-[![CI](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/trading_bot_new/actions/workflows/ci.yml)
+[![CI](https://github.com/Manideep728/options-research-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/Manideep728/options-research-harness/actions/workflows/ci.yml)
 
 An options trading bot on an **Alpaca paper account**, plus the research harness
 that evaluates it. The interesting part is not the bot. It is that the harness

@@ -1,6 +1,6 @@
 # Research loop
 
-> Part of [trading_bot_new](../README.md).
+> Part of [options-research-harness](../README.md).
 
 A guarded self-improvement pipeline, separate from the live bot (the engine
 never imports it). The cycle:
