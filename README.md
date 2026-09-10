@@ -164,6 +164,41 @@ running inside it, and no changes to the engine at all.
 → [Architecture](docs/architecture.md) lists the broker interface, the strategy
 rules and the file-by-file layout.
 
+## Two backtest paths
+
+The harness backtests at two fidelities, and the speed difference between them
+is the reason both exist.
+
+| path | throughput | one unit of work |
+|---|---:|---|
+| `bot/simulator.py` `simulate()` | ~666k bars/sec | one bar through the Black-Scholes P&L model |
+| `research/replay.py` | ~7.4k rows/sec (246 cycles/sec) | one full `Engine.run_cycle()` |
+
+`simulate()` reads 8 of the roughly 40 fields in `Settings`. It knows the signal
+and the exit rules and nothing else: not `max_positions`, not the daily trade
+cap, not the signal cooldown, not the five-name shortlist, not the liquidity
+gates. That is what makes it fast enough to grid-search hundreds of candidates.
+`research/replay.py` runs every one of those gates, because it drives the real
+engine, and that costs about 90x per row.
+
+The useful number here is not the speed but the disagreement. On a comparison
+run over real bars, `simulate()` takes 250 trades where the real engine takes
+52, so the fast path sees roughly 4.8x more trades than the live rules would
+ever permit. Measuring the size of that gap is the reason the slow path exists,
+and `simulate()` should be deleted once replay is fast enough to search with.
+Two P&L models is drift waiting to happen.
+
+```powershell
+.venv\Scripts\python scripts\bench_replay.py --sessions 250
+```
+
+The benchmark synthesizes bars rather than fetching them, because
+`research/data/` is gitignored and a benchmark nobody can re-run is not worth
+much. The engine does the same work per bar either way, but the prices decide
+how many signals fire, so the script prints its seed and its trade counts.
+Figures above are from an M-series Mac; the ratio between the two paths travels
+better than the absolute numbers.
+
 ## Tests
 
 ```powershell
