@@ -1,7 +1,7 @@
 [project]
-name = "trading-bot"
+name = "options-research-harness"
 version = "0.1.0"
-description = "Guarded strategy-research harness with an Alpaca paper-trading options bot as its execution target"
+description = "Options strategy research and Alpaca paper-trading harness"
 requires-python = ">=3.13"
 
 [tool.pytest.ini_options]

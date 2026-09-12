@@ -28,7 +28,7 @@ arc](variance-risk-premium.md):
   cost levels and both structures. A spread that loses more than its stated
   bound is not defined-risk, and the first version lost 102% of it.
 - `test_get_closes_never_returns_a_bar_at_or_after_now` — the replay causality
-  contract, checked at every step rather than once.
+  contract, checked at every step instead of once.
 - `test_positions_reprice_through_the_shared_option_model` — replay must not grow
   a second P&L model.
 - `test_daily_bars_are_never_session_filtered` — the session filter would delete
@@ -38,8 +38,7 @@ arc](variance-risk-premium.md):
 - `test_same_params_on_a_different_dataset_is_a_different_trial` — the stale
   score-reuse bug.
 - `test_mutating_route_rejected_without_csrf_header` — parametrized across every
-  mutating dashboard route, and verified to fail the suite when the guard is
-  removed.
+  mutating dashboard route. I removed the guard and confirmed the suite fails.
 
 The rest cover indicator math (including a known Wilder RSI value), signal
 triggers, contract filters, every risk gate, journal P&L matching (incl.
@@ -52,4 +51,3 @@ cancels, max-hold via journal, two-tier ranking, cooldown, blackout), the
 engine PID lock, the atomic file writer, and the research loop (holdout
 splits/embargo, deflated Sharpe, burn-once gate, select-on-train search,
 registry-aware skip).
-

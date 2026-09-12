@@ -216,21 +216,6 @@ the whole audit.
 → [Tests and quality gates](docs/tests.md) walks through the eleven tests that
 pin the findings, and summarizes what the rest cover.
 
-## How this was built
-
-This repo was written with AI assistance. The direction, the review and the
-decision to distrust the output were mine.
-
-`research/proposer.py` is where that shows up in code. An LLM can propose
-strategies, but only as JSON specs drawn from the fixed block vocabulary in
-`research/blocks.py`, with every parameter clamped to a bounded range. It cannot
-emit code. Each proposal is validated, logged to the committed registry and
-counted in `N`, so a model that fires off a hundred ideas raises the statistical
-bar its own winner has to clear.
-
-That is also how the original bug surfaced. The tooling produced 986 plausible
-results, and the control it was missing is what showed they were wrong.
-
 ## Documentation
 
 | page | what is in it |
