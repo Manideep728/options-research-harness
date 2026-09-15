@@ -102,57 +102,44 @@ dashboard and the guarded self-tuner.
 
 ## Architecture
 
+Three processes that never import each other. They talk only through files.
+
+Both the bot and the dashboard reach Alpaca through `bot/broker.py`.
+
 ```mermaid
 flowchart LR
-    subgraph loop["Trading loop (main.py)"]
-        engine["engine.py<br/>clock → reconcile → exits → entries"]
-        scanner["scanner.py<br/>rank universe, keep top 5"]
-        strategy["strategy.py<br/>EMA trend + RSI cross"]
-        risk["risk.py<br/>entry gates · sizing · exit rules"]
-        options["options.py<br/>contract selection + liquidity gates"]
-        engine --> scanner
-        engine --> strategy
-        engine --> risk
-        engine --> options
-    end
-
-    broker["broker.py<br/>the ONLY Alpaca client"]
+    research["Research loop<br/>(offline)"]
+    tuned[("tuned_params.json<br/>optional")]
+    bot["Trading loop<br/>main.py"]
     alpaca[("Alpaca paper API")]
-    engine --> broker --> alpaca
+    dash["Dashboard<br/>FastAPI + Next.js"]
+    control[("control.json")]
+    out[("trades.csv<br/>state.json<br/>active.json")]
 
-    subgraph state["Shared state (files)"]
-        journal[("trades.csv")]
-        day[("state.json")]
-        active[("active.json")]
-        control[("control.json")]
-        tuned[("tuned_params.json<br/>optional; absent by default")]
-    end
-    engine --> journal
-    engine --> day
-    engine --> active
-    control --> engine
-    tuned --> engine
+    research -. "evidence for review" .-> tuned --> bot
+    bot --> alpaca
+    bot --> out --> dash
+    control --> bot
+    dash --> control
+    dash -. "start / stop" .-> bot
+    dash --> alpaca
+```
 
-    subgraph dash["Dashboard"]
-        api["dashboard_api.py<br/>FastAPI"] --> web["web/<br/>Next.js UI"]
-    end
-    api --> active
-    api --> control
-    api -. "start / stop main.py" .-> engine
+### Trading loop
 
-    subgraph research["Research loop (offline — never imported by the bot)"]
-        vrpmod["vrp.py<br/>does the effect exist? (kill criterion)"]
-        search["search.py<br/>train-only grid search"]
-        nullmod["null.py<br/>coin-flip control"]
-        replaymod["replay.py<br/>ReplayBroker"]
-        gate["gate.py<br/>burn-once holdout verdict"]
-        proposer["proposer.py<br/>LLM strategy specs (JSON, never code)"]
-        proposer --> search --> gate
-        nullmod --> search
-        vrpmod -. "licenses the attempt" .-> search
-    end
-    replaymod -. "same 12-method interface as broker.py" .-> engine
-    gate -. "evidence for manual review" .-> tuned
+Each tick, `engine.py` walks the same sequence and calls out to one module per
+concern. `broker.py` is the only file that talks to Alpaca.
+
+```mermaid
+flowchart TD
+    engine["engine.py<br/>clock → reconcile → exits → entries"]
+    engine --> scanner["scanner.py<br/>rank universe, keep top 5"]
+    engine --> strategy["strategy.py<br/>EMA trend + RSI cross"]
+    engine --> risk["risk.py<br/>entry gates · sizing · exit rules"]
+    engine --> options["options.py<br/>contract selection + liquidity gates"]
+    engine --> iface{{"12-method broker interface"}}
+    iface --> broker["broker.py<br/>live: Alpaca"]
+    iface -.-> replay["research/replay.py<br/>backtest: CSV bar cache"]
 ```
 
 `bot/engine.py` never imports Alpaca. It depends only on a duck-typed broker
@@ -160,6 +147,21 @@ object, 12 methods wide. `research/replay.py` implements those same 12 methods
 against the CSV bar cache, which lets the backtest drive the real
 `Engine.run_cycle()`, with the real risk gates, scanner and contract selection
 running inside it, and no changes to the engine at all.
+
+### Research loop
+
+Offline only; nothing here is imported by the bot. A gate pass is evidence for
+review, not a deploy. `tuned_params.json` itself is written by `backtest.py --tune`
+(see [Operations](docs/operations.md)).
+
+```mermaid
+flowchart LR
+    vrp["vrp.py<br/>does the effect exist?"] -. "licenses the attempt" .-> search
+    proposer["proposer.py<br/>LLM specs (JSON, never code)"] --> search
+    null["null.py<br/>coin-flip control"] --> search
+    search["search.py<br/>train-only grid search"] --> gate["gate.py<br/>burn-once holdout verdict"]
+    gate -. "evidence for review" .-> tuned[("tuned_params.json")]
+```
 
 → [Architecture](docs/architecture.md) lists the broker interface, the strategy
 rules and the file-by-file layout.
